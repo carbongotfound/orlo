@@ -1,0 +1,29 @@
+# Builds the portable exe for a published release and attaches it.
+name: Release
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm tauri build --no-bundle
+      - name: Attach exe
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = "${{ github.event.release.tag_name }}".TrimStart("v")
+          $exe = Get-ChildItem -Recurse -Filter orlo.exe -Path src-tauri/target/release, target/release -ErrorAction SilentlyContinue | Select-Object -First 1
+          Copy-Item $exe.FullName "Orlo-$v-windows-x64.exe"
+          gh release upload "${{ github.event.release.tag_name }}" "Orlo-$v-windows-x64.exe" --clobber
