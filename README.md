@@ -12,9 +12,9 @@ Write a task, hand it to Claude Code, Codex or Grok, then review and approve the
 
 <img src="docs/screenshots/home.png" alt="Orlo home screen" width="860" />
 
-<a href="https://github.com/carbongotfound/orlo/releases/download/v1.1.0/Orlo-launch-film.mp4"><img src="docs/launch-film.jpg" alt="Still from the Orlo launch film: Claude's fix for a login bug next to the one-line diff" width="860" /></a>
+<a href="https://github.com/carbongotfound/orlo/releases/download/v1.1.0/Orlo-launch-film.mp4"><img src="docs/launch-film.webp" alt="Orlo launch film" width="860" /></a>
 
-▶ **[Watch the 28-second launch film](https://github.com/carbongotfound/orlo/releases/download/v1.1.0/Orlo-launch-film.mp4)**
+🔊 **[Watch with sound](https://github.com/carbongotfound/orlo/releases/download/v1.1.0/Orlo-launch-film.mp4)**
 
 </div>
 
