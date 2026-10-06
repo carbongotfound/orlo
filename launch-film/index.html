@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=1920, height=1080">
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Geist"; src: url("assets/fonts/geist-latin-wght-normal.woff2") format("woff2"); font-weight: 100 900; }
+      @font-face { font-family: "Cascadia Mono"; src: url("assets/fonts/CascadiaMono.ttf") format("truetype"); }
+      :root { --ink: #fafafa; --mute: #a1a1a1; --dim: #525252; --field: #000; --blue: #1447e6; --red: #f87171; --green: #4ade80; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1920px; height: 1080px; overflow: hidden; background: var(--field); }
+      #root { position: relative; width: 1920px; height: 1080px; overflow: hidden; background: var(--field); font-family: "Geist", sans-serif; color: var(--ink); }
+      .scene { position: absolute; inset: 0; opacity: 0; }
+      .abs { position: absolute; }
+
+      /* titles */
+      .card { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+      #s1img, #s1name, #s6img, #s6name { opacity: 0; }
+      .mark { display: flex; align-items: center; gap: 44px; }
+      .mark img { width: 190px; height: 190px; border-radius: 44px; }
+      .mark b { font-size: 236px; font-weight: 800; letter-spacing: -0.055em; line-height: 1; }
+      .line { margin-top: 44px; font-size: 52px; font-weight: 500; letter-spacing: -0.02em; color: var(--mute); display: flex; gap: 0.28em; }
+      .line span { opacity: 0; }
+
+      /* terminal */
+      #term { position: absolute; left: 260px; top: 330px; width: 1400px; height: 420px; background: #0c0c0c; border: 2px solid #262626; border-radius: 22px; font-family: "Cascadia Mono", monospace; }
+      #term .bar { height: 64px; border-bottom: 2px solid #1c1c1c; display: flex; align-items: center; padding: 0 30px; gap: 14px; font-size: 26px; color: var(--mute); }
+      #term .bar i { width: 14px; height: 14px; border-radius: 7px; background: #333; }
+      #term .head { margin: 46px 56px 0; font-size: 30px; color: #d97757; }
+      #term .head span { color: var(--mute); }
+      #term .box { margin: 26px 46px 0; border: 2px solid #3a3a3a; border-radius: 14px; padding: 26px 30px; font-size: 38px; display: flex; white-space: pre; }
+      #term .box .p { color: var(--mute); }
+      #typed { display: inline-block; overflow: hidden; width: 0ch; vertical-align: bottom; }
+      #caret { display: inline-block; width: 0.6em; background: var(--ink); }
+
+      /* app screens */
+      #app { position: absolute; inset: 0; overflow: hidden; transform-origin: 960px 540px; }
+      #cam { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; transform-origin: 0 0; }
+      .scr { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; opacity: 0; }
+      .patch { position: absolute; opacity: 0; border-left: 3px solid var(--ink); }
+      #cursor, #cursor2 { position: absolute; left: 0; top: 0; opacity: 0; }
+      .arrow { width: 26px; height: 38px; transform-origin: 0 0; display: block; filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.5)); }
+
+      /* captions */
+      .cap.r { left: 1340px; }
+      .cap { position: absolute; left: 50%; bottom: 84px; transform: translateX(-50%); }
+      .cap b { display: block; padding: 18px 34px; background: #000; border-radius: 18px; font-size: 54px; font-weight: 700; letter-spacing: -0.03em; white-space: nowrap; opacity: 0; }
+
+      /* split */
+      #left { position: absolute; left: 0; top: 0; width: 760px; height: 1080px; overflow: hidden; background: #0a0a0a; }
+      #left img { position: absolute; left: -1550px; top: -216px; width: 2304px; height: 1296px; opacity: 0; }
+      #stream { position: absolute; left: 0; width: 760px; background: #0a0a0a; opacity: 0; }
+      #right { position: absolute; left: 760px; top: 0; width: 1160px; height: 1080px; background: #050505; border-left: 2px solid #262626; padding: 190px 40px 0 48px; font-family: "Cascadia Mono", monospace; font-size: 27px; line-height: 1.75; }
+      #right .file { font-size: 28px; color: var(--mute); margin-bottom: 36px; display: flex; gap: 22px; }
+      #right .file .st { opacity: 0; }
+      .ln { white-space: pre; color: #737373; padding-left: 8px; border-left: 4px solid transparent; }
+      .ln .m { color: var(--dim); }
+      .s { color: #ce9178; }
+      .k { color: #569cd6; }
+      #del { position: relative; }
+      #bare { position: relative; display: inline-block; }
+      #bare i { position: absolute; left: -4px; right: -4px; top: 54%; height: 3px; background: var(--ink); transform-origin: 0 50%; }
+      .add { white-space: pre-wrap; padding-left: 8px; border-left: 4px solid var(--green); background: rgba(74, 222, 128, 0.13); color: #e5e5e5; height: 0; overflow: hidden; }
+      .add .m { color: var(--green); }
+      .cm { color: #6a9955; }
+      #test { margin-top: 60px; font-size: 27px; opacity: 0; }
+      #test .ok { color: var(--green); opacity: 0; }
+      .tag { position: absolute; top: 46px; font-size: 26px; font-weight: 600; color: var(--mute); letter-spacing: -0.01em; }
+
+      /* kinetic words */
+      #w4 { font-size: 140px; letter-spacing: -0.05em; }
+      #w4 span { color: var(--dim); }
+      .word { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 300px; font-weight: 800; letter-spacing: -0.06em; opacity: 0; }
+      #under { position: absolute; left: 640px; top: 720px; width: 640px; height: 22px; background: var(--blue); transform-origin: 0 50%; }
+
+      .url { margin-top: 40px; font-size: 46px; font-weight: 500; letter-spacing: -0.01em; color: var(--ink); white-space: pre; }
+      .url span { display: inline-block; overflow: hidden; width: 0ch; vertical-align: bottom; font-family: "Cascadia Mono", monospace; font-size: 42px; }
+      .small { margin-top: 26px; font-size: 32px; font-weight: 500; color: var(--mute); opacity: 0; }
+
+      #slash { position: absolute; left: 0; top: -200px; width: 1500px; height: 1480px; background: var(--blue); filter: url(#mbs); }
+    </style>
+  </head>
+  <body>
+    <div data-hf-id="hf-sebc" id="root" data-composition-id="main" data-start="0" data-duration="28" data-width="1920" data-height="1080">
+      <svg data-hf-id="hf-6o47" width="0" height="0" style="position: absolute"><filter data-hf-id="hf-9lvt" id="mb" x="-5%" y="-5%" width="110%" height="110%"><fegaussianblur data-hf-id="hf-w78i" id="mbg" stdDeviation="0 0" /></filter><filter data-hf-id="hf-7c2g" id="mbs" x="-20%" y="0" width="140%" height="100%"><fegaussianblur data-hf-id="hf-x4js" stdDeviation="60 0" /></filter></svg>
+      <audio data-hf-id="hf-gj89" id="mix" src="assets/mix.wav" data-start="0" data-duration="28" data-track-index="0"></audio>
+
+      <div data-hf-id="hf-wngd" id="film" class="clip" data-start="0" data-duration="28" data-track-index="1">
+        <!-- S1: wordmark -->
+        <div data-hf-id="hf-yihu" id="s1" class="scene">
+          <div data-hf-id="hf-ymtm" class="card" id="s1card">
+            <div data-hf-id="hf-dgvy" class="mark" id="s1mark"><img data-hf-id="hf-pv16" id="s1img" src="assets/mascot.png" alt=""><b data-hf-id="hf-pc6t" id="s1name">Orlo</b></div>
+            <div data-hf-id="hf-np12" class="line"><span data-hf-id="hf-uijl" id="t1">Tasks, notes and AI agents</span><span data-hf-id="hf-wl66" id="t2">in one calm Windows app.</span></div>
+          </div>
+        </div>
+
+        <!-- S2: terminal -->
+        <div data-hf-id="hf-ukdt" id="s2" class="scene">
+          <div data-hf-id="hf-q8fr" id="term">
+            <div data-hf-id="hf-ly8d" class="bar"><i data-hf-id="hf-wt6k"></i><i data-hf-id="hf-zeb8"></i><i data-hf-id="hf-y7e5"></i>&#160;claude</div>
+            <div data-hf-id="hf-y5uc" class="head">✻ Claude Code <span data-hf-id="hf-98j5">· D:\dev\orlo</span></div>
+            <div data-hf-id="hf-d74r" class="box"><span data-hf-id="hf-vat7" class="p">&gt; </span><span data-hf-id="hf-6ozn" id="typed">hand this task to claude and fix what breaks</span><span data-hf-id="hf-ngrb" id="caret">&#160;</span></div>
+          </div>
+        </div>
+
+        <!-- S3 + montage: the real app -->
+        <div data-hf-id="hf-on4j" id="app" class="scene">
+          <div data-hf-id="hf-frxh" id="cam" data-layout-allow-overflow="">
+            <img data-hf-id="hf-21y9" class="scr" id="tasks" src="assets/ui/tasks.png" alt="">
+            <img data-hf-id="hf-w9l1" class="scr" id="typedscr" src="assets/ui/typed.png" alt="">
+            <img data-hf-id="hf-gu45" class="scr" id="agents" src="assets/ui/agents.png" alt="">
+            <img data-hf-id="hf-fkip" class="scr" id="picked" src="assets/ui/picked.png" alt="">
+            <img data-hf-id="hf-x1ot" class="scr" id="working" src="assets/ui/working.png" alt="">
+            <img data-hf-id="hf-st8i" class="scr" id="nempty" src="assets/ui/note-empty.png" alt="">
+            <img data-hf-id="hf-9pm6" class="scr" id="nhash" src="assets/ui/note-hash.png" alt="">
+            <img data-hf-id="hf-y6u2" class="scr" id="nh1" src="assets/ui/note-h1.png" alt="">
+            <img data-hf-id="hf-aaqo" class="scr" id="ncheck" src="assets/ui/note-check.png" alt="">
+            <img data-hf-id="hf-7vxt" class="scr" id="board" src="assets/ui/board.png" alt="">
+            <img data-hf-id="hf-8er5" class="scr" id="search" src="assets/ui/search.png" alt="">
+            <img data-hf-id="hf-lrjh" class="scr" id="home" src="assets/ui/home2.png" alt="">
+            <img data-hf-id="hf-l7ox" class="scr" id="palette" src="assets/ui/palette.png" alt="">
+            <img data-hf-id="hf-6i6b" class="scr" id="notes" src="assets/ui/note-done.png" alt="">
+            <div data-hf-id="hf-j4tw" class="patch" id="p-task" style="right: 1180px; top: 120px; width: 322px; height: 32px; background: #171717"></div>
+            <div data-hf-id="hf-j67i" class="patch" id="p-h1" style="right: 352px; top: 430px; width: 240px; height: 58px; background: #0a0a0a"></div>
+            <div data-hf-id="hf-r6mm" class="patch" id="p-book" style="right: 437px; top: 490px; width: 130px; height: 30px; background: #0a0a0a"></div>
+            <div data-hf-id="hf-8gdj" id="cursor"><svg data-hf-id="hf-e894" class="arrow" viewBox="0 0 26 38"><path data-hf-id="hf-vig1" d="M2 2 L2 31 L9.5 24 L14.5 35.5 L19.5 33.3 L14.6 22 L24.5 22 Z" fill="#fff" stroke="#000" stroke-width="2.2" stroke-linejoin="round" /></svg></div>
+          </div>
+        </div>
+
+        <!-- S4: split edit pass -->
+        <div data-hf-id="hf-8yme" id="split" class="scene">
+          <div data-hf-id="hf-5p0y" id="left">
+            <img data-hf-id="hf-njnv" data-layout-allow-overflow="" id="lno" src="assets/ui/thread-nologin.png" alt="">
+            <img data-hf-id="hf-buvx" data-layout-allow-overflow="" id="lfix" src="assets/ui/thread-fixed.png" alt="">
+            <div data-hf-id="hf-ulp1" id="stream"></div>
+            <div data-hf-id="hf-ror3" id="cursor2"><svg data-hf-id="hf-x9ds" class="arrow" viewBox="0 0 26 38"><path data-hf-id="hf-cfn9" d="M2 2 L2 31 L9.5 24 L14.5 35.5 L19.5 33.3 L14.6 22 L24.5 22 Z" fill="#fff" stroke="#000" stroke-width="2.2" stroke-linejoin="round" /></svg></div>
+          </div>
+          <div data-hf-id="hf-egrl" id="right">
+            <div data-hf-id="hf-fg4c" class="file">src-tauri/src/lib.rs <span data-hf-id="hf-7km0" class="st"><span data-hf-id="hf-bae3" style="color: var(--red)">−1</span> <span data-hf-id="hf-r7nr" style="color: var(--green)">+2</span></span></div>
+            <div data-hf-id="hf-9wxa" class="ln"><span data-hf-id="hf-7yfe" class="m">  </span>const CLAUDE_FLAGS: &amp;[&amp;str] = &amp;[</div>
+            <div data-hf-id="hf-2quk" class="ln"><span data-hf-id="hf-48ge" class="m">  </span>  …</div>
+            <div data-hf-id="hf-nehj" class="ln" id="del" style="color: #e5e5e5"><span data-hf-id="hf-n6rs" class="m" id="dm" style="opacity: 0; color: #f87171">- </span>  <span data-hf-id="hf-3qr3" class="s">"--max-turns"</span>, <span data-hf-id="hf-43sp" class="s">"30"</span>, <span data-hf-id="hf-86b9" class="s">"--max-budget-usd"</span>, <span data-hf-id="hf-89um" class="s">"1.50"</span>, <span data-hf-id="hf-gs6e" id="bare"><span data-hf-id="hf-w0y6" class="s">"--bare"</span>,<i data-hf-id="hf-ylp6"></i></span></div>
+            <div data-hf-id="hf-datn" class="add" id="add1"><span data-hf-id="hf-g0s3" class="m">+ </span>  <span data-hf-id="hf-rkgf" class="s">"--max-turns"</span>, <span data-hf-id="hf-lkwd" class="s">"30"</span>, <span data-hf-id="hf-99nt" class="s">"--max-budget-usd"</span>, <span data-hf-id="hf-xubm" class="s">"1.50"</span>,</div>
+            <div data-hf-id="hf-t7pe" class="ln"><span data-hf-id="hf-4mrf" class="m">  </span>];</div>
+            <div data-hf-id="hf-f5sy" class="add" id="add2"><span data-hf-id="hf-dm4z" class="m">+ </span><span data-hf-id="hf-d7tx" class="cm">// No --bare: it switches Claude Code to API-key-only auth, so a normal `claude /login` would read as "Not logged in".</span></div>
+            <div data-hf-id="hf-oylt" id="test"><span data-hf-id="hf-lkom" style="color: var(--mute)">&gt; cargo test</span><br data-hf-id="hf-x5px"><span data-hf-id="hf-ls7k" class="ok">test result: ok. 4 passed; 0 failed</span></div>
+          </div>
+        </div>
+
+        <!-- S5: words -->
+        <div data-hf-id="hf-lwhy" id="s5" class="scene">
+          <div data-hf-id="hf-ut1h" class="word" id="w1">Delegate.</div>
+          <div data-hf-id="hf-kqdh" class="word" id="w2">Review.</div>
+          <div data-hf-id="hf-95ta" class="word" id="w3">Done.</div>
+          <div data-hf-id="hf-46k1" id="under"></div>
+          <div data-hf-id="hf-v5m3" class="word" id="w4"><span data-hf-id="hf-9ify">Delegate.&#160;Review.&#160;</span>Done.</div>
+        </div>
+
+        <!-- S6: end card -->
+        <div data-hf-id="hf-hydx" id="s6" class="scene">
+          <div data-hf-id="hf-4ogl" class="card" id="s6card">
+            <div data-hf-id="hf-pfmt" class="mark" id="s6mark"><img data-hf-id="hf-ywzi" id="s6img" src="assets/mascot.png" alt=""><b data-hf-id="hf-h8vd" id="s6name">Orlo</b></div>
+            <div data-hf-id="hf-r0fv" class="url"><span data-hf-id="hf-slvi" id="url">github.com/carbongotfound/orlo</span></div>
+            <div data-hf-id="hf-64c5" class="small" id="free">Free and open source · Windows 10 and 11</div>
+          </div>
+        </div>
+
+        <!-- captions -->
+        <div data-hf-id="hf-2mgg" class="cap"><b data-hf-id="hf-zqfg" id="c1">Tag it as you type.</b></div>
+        <div data-hf-id="hf-xclk" class="cap"><b data-hf-id="hf-zvyu" id="c2">Hand it to Claude.</b></div>
+        <div data-hf-id="hf-w5oh" class="cap"><b data-hf-id="hf-1jrf" id="c3">Notes that format themselves.</b></div>
+        <div data-hf-id="hf-d5fe" class="cap r"><b data-hf-id="hf-8kyu" id="c4">Agent stuck? See why.</b></div>
+        <div data-hf-id="hf-lyzi" class="cap r"><b data-hf-id="hf-v40a" id="c5">One flag. Fixed.</b></div>
+        <div data-hf-id="hf-mdaj" class="cap r"><b data-hf-id="hf-musl" id="c6">You approve.</b></div>
+
+        <div data-hf-id="hf-fsq3" id="slash" data-layout-allow-overflow=""></div>
+      </div>
+    </div>
+    <script id="film-timeline">
+// Orlo launch film timeline. audio/cues.mjs also runs this block (with a stub gsap) to place the sound cues.
+const tl = gsap.timeline({ paused: true });
+const B = (k) => 0.0162 + 0.47242 * k; // 127 BPM beat grid shared with audio/compose.py; drop on B(32) = 15.134
+const F = 1 / 60;
+const cues = []; // [time, kind]: click | tick | sub | whoosh
+
+// Arrive fast, land soft: every frame covers 15% of the remaining distance, then a normalised finish.
+const land = (d) => {
+  const n = Math.max(1, d * 60);
+  return (p) => (1 - Math.pow(0.85, p * n)) / (1 - Math.pow(0.85, n));
+};
+
+const on = (sel, t) => tl.set(sel, { opacity: 1 }, t);
+const off = (sel, t) => tl.set(sel, { opacity: 0 }, t);
+const SCR = ["#tasks", "#typedscr", "#agents", "#picked", "#working", "#nempty", "#nhash", "#nh1", "#ncheck", "#board", "#search", "#home", "#palette", "#notes"];
+const show = (id, t) => SCR.forEach((s) => tl.set(s, { opacity: s === id ? 1 : 0 }, t));
+
+// Camera. Shots are collected, then flushed: each move lands with `land`, carries motion blur along
+// its direction that clears as it settles, and the hold after it keeps a slow push-in until the next shot.
+const shots = [];
+const cam = (t, cx, cy, s, d = 0.55) => shots.push({ t, cx, cy, s, d });
+const cut = (t, cx, cy, s) => shots.push({ t, cx, cy, s, d: 0 });
+const frame = (cx, cy, s) => ({
+  x: Math.min(0, Math.max(1920 - 1920 * s, 960 - cx * s)),
+  y: Math.min(0, Math.max(1080 - 1080 * s, 540 - cy * s)),
+  scale: s,
+});
+const PUSH = 0.035; // scale gained per second while holding (~0.06% a frame)
+const flushCam = () => {
+  shots.sort((a, b) => a.t - b.t);
+  let prev = frame(960, 540, 1);
+  shots.forEach((sh, i) => {
+    const to = frame(sh.cx, sh.cy, sh.s);
+    if (sh.d === 0) tl.set("#cam", to, sh.t);
+    else {
+      tl.to("#cam", { ...to, duration: sh.d, ease: land(sh.d) }, sh.t);
+      // the first frame pans 15% of the way: smear a third of that along the pan (zoom alone gets none), in frame px
+      const bx = Math.min(8, Math.abs(to.x - prev.x) * 0.05);
+      const by = Math.min(8, Math.abs(to.y - prev.y) * 0.05);
+      if (bx + by > 1) {
+        // the filter is only on while it smears, so settled frames rasterise at full resolution
+        tl.set("#app", { filter: "url(#mb)" }, sh.t);
+        tl.fromTo("#mbg", { attr: { stdDeviation: `${bx} ${by}` } }, { attr: { stdDeviation: "0 0" }, duration: sh.d * 0.6, ease: "power2.out", immediateRender: false }, sh.t);
+        tl.set("#app", { filter: "none" }, sh.t + sh.d * 0.6);
+      }
+    }
+    const next = shots[i + 1] ? shots[i + 1].t : 28;
+    const hold = next - (sh.t + sh.d);
+    if (hold > 0.05) {
+      const pushed = frame(sh.cx, sh.cy, sh.s * (1 + PUSH * hold));
+      tl.to("#cam", { ...pushed, duration: hold, ease: "none" }, sh.t + sh.d);
+      prev = pushed;
+    } else prev = to;
+  });
+};
+
+const move = (sel, t, x, y, d = 0.36) => tl.to(sel, { x, y, duration: d, ease: land(d) }, t);
+// cursor hit: 0.92 for two frames, with a click on the same frame
+const click = (sel, t) => {
+  tl.set(sel + " .arrow", { scale: 0.92 }, t);
+  tl.set(sel + " .arrow", { scale: 1 }, t + 2 * F);
+  cues.push([t, "click"]);
+};
+const slam = (sel, t, from = 1.14, sound = true) => {
+  on(sel, t);
+  tl.fromTo(sel, { scale: from }, { scale: 1, duration: 0.4, ease: land(0.4), immediateRender: false }, t);
+  if (sound) cues.push([t, "sub"]);
+};
+const rise = (sel, t, dy = 36, d = 0.4) => {
+  on(sel, t);
+  tl.fromTo(sel, { y: dy }, { y: 0, duration: d, ease: land(d), immediateRender: false }, t);
+};
+const cap = (id, t0, t1) => { rise(id, t0, 40); off(id, t1); };
+// typing: a patch of the real background colour shrinks off the real typed text, one character per step
+const typeOn = (id, t, d, n, w) => {
+  on(id, t);
+  tl.fromTo(id, { width: w }, { width: 0, duration: d, ease: `steps(${n})`, immediateRender: false }, t);
+  off(id, t + d + 0.25);
+  for (let i = 0; i < n; i++) cues.push([t + (i * d) / n, "tick"]);
+};
+// the only transition: one blue slash, smeared along its travel; the whoosh peaks as it covers the frame
+const slash = (t) => {
+  tl.fromTo("#slash", { x: -3400 }, { x: 2800, duration: 0.34, ease: "power2.inOut", immediateRender: false }, t - 0.17);
+  cues.push([t, "whoosh"]);
+};
+const drift = (sel, t0, t1, to = 1.04) => tl.fromTo(sel, { scale: 1 }, { scale: to, duration: t1 - t0, ease: "none", immediateRender: false }, t0);
+
+gsap.set("#slash", { x: -3400, skewX: -20 });
+gsap.set("#bare i", { scaleX: 0 });
+gsap.set("#under", { scaleX: 0 });
+gsap.set("#cam", { x: 0, y: 0, scale: 1 });
+gsap.set("#cursor", { x: 1250, y: 760 });
+
+// S1 0 - 1.9: mascot on the first kick, name 3 frames behind it, the README line on the next two kicks
+on("#s1", 0);
+slam("#s1img", B(0), 1.25);
+slam("#s1name", B(0) + 3 * F, 1.18, false);
+rise("#t1", B(1), 30, 0.36);
+rise("#t2", B(2), 30, 0.36);
+drift("#s1card", B(0), B(3), 1.03);
+tl.to("#s1card", { scale: 1.1, duration: 0.4, ease: land(0.4) }, B(3));
+slash(B(4));
+off("#s1", B(4));
+
+// S2 1.9 - 6.2: Claude Code prompt types, Enter on the kick, the real app springs out of it
+on("#s2", B(4));
+tl.fromTo("#term", { scale: 0.93 }, { scale: 1, duration: 0.5, ease: land(0.5), immediateRender: false }, B(4));
+drift("#term", B(4) + 0.5, B(11), 1.035);
+const TYPE = [B(5), B(10) + 0.15];
+tl.fromTo("#typed", { width: "0ch" }, { width: "44ch", duration: TYPE[1] - TYPE[0], ease: "steps(44)", immediateRender: false }, TYPE[0]);
+for (let i = 0; i < 44; i++) cues.push([TYPE[0] + (i * (TYPE[1] - TYPE[0])) / 44, "tick"]);
+for (const [a, b] of [[B(4), B(5)], [TYPE[1], B(11)]]) for (let t = a; t < b - 0.1; t += 0.25) { tl.set("#caret", { opacity: 0 }, t + 0.125); tl.set("#caret", { opacity: 1 }, t + 0.25); }
+cues.push([B(11), "click"]);
+cues.push([B(11), "sub"]);
+on("#app", B(11));
+show("#tasks", B(11));
+tl.fromTo("#app", { scale: 0.22, borderRadius: 60 }, { scale: 1, borderRadius: 0, duration: 0.75, ease: land(0.75), immediateRender: false }, B(11));
+cues.push([B(11) + 0.12, "whoosh"]);
+off("#s2", B(11) + 0.5);
+
+// S3 feature 1 6.2 - 8.5: type a task with a #tag
+cut(0, 960, 540, 1);
+cut(B(11), 960, 540, 1);
+on("#cursor", B(13));
+cam(B(13), 600, 180, 1.85);
+move("#cursor", B(13), 470, 128, 0.44);
+click("#cursor", B(14));
+show("#typedscr", B(14));
+tl.set("#cursor", { opacity: 0 }, B(14) + 0.1);
+typeOn("#p-task", B(14) + 0.05, 1.25, 33, 322);
+cap("#c1", B(14), B(19));
+cam(B(14) + 0.5, 520, 180, 1.85, 1.2);
+
+// feature 2 8.5 - 11.4: pick Claude, Add & delegate, it starts working
+tl.set("#cursor", { x: 600, y: 150, opacity: 1 }, B(18));
+cam(B(18), 760, 250, 1.85);
+move("#cursor", B(18), 735, 180, 0.4);
+click("#cursor", B(19));
+show("#agents", B(19));
+cap("#c2", B(19), B(24));
+move("#cursor", B(19) + 0.12, 740, 272, 0.32);
+click("#cursor", B(20));
+show("#picked", B(20));
+cam(B(20) + 0.08, 1500, 230, 1.85, 0.6);
+move("#cursor", B(20) + 0.08, 1716, 182, 0.36);
+click("#cursor", B(21));
+show("#working", B(21));
+cam(B(21), 960, 470, 1.18, 0.5);
+tl.set("#cursor", { opacity: 0 }, B(21) + 0.12);
+cam(B(22), 1520, 540, 2.0, 0.6);
+cam(B(23), 620, 410, 1.7, 0.6);
+
+// feature 3 11.4 - 14.2: a note formats itself as you type
+show("#nempty", B(24));
+cut(B(24), 1460, 470, 1.9);
+cap("#c3", B(24), B(30));
+show("#nhash", B(25));
+cues.push([B(25), "tick"]);
+show("#nh1", B(25.5));
+typeOn("#p-h1", B(25.5), 0.6, 16, 240);
+show("#ncheck", B(27));
+typeOn("#p-book", B(27), 0.36, 12, 130);
+cam(B(28), 1150, 560, 1.25, 0.6);
+cam(B(29), 1044, 668, 1.65, 0.6);
+
+// S4 14.2 - 17.97: split during the track's break. Left: the real thread. Right: the real fix in lib.rs.
+slash(B(30));
+off("#app", B(30));
+on("#split", B(30));
+tl.set("#lno", { opacity: 1 }, B(30));
+tl.fromTo("#left", { scale: 1 }, { scale: 1.04, duration: B(33) - B(30), ease: "none", transformOrigin: "0 50%", immediateRender: false }, B(30));
+cap("#c4", B(30), B(31.75));
+// the drop: the diff lands
+tl.set("#dm", { opacity: 1 }, B(32));
+tl.set("#del", { background: "rgba(248, 113, 113, 0.16)", borderLeftColor: "#f87171" }, B(32));
+tl.set("#bare", { background: "rgba(220, 38, 38, 0.75)" }, B(32));
+tl.set("#bare .s", { color: "#fff" }, B(32));
+tl.fromTo("#bare i", { scaleX: 0 }, { scaleX: 1, duration: 0.3, ease: land(0.3), immediateRender: false }, B(32));
+tl.fromTo("#bare", { scale: 1.35 }, { scale: 1, duration: 0.45, ease: land(0.45), immediateRender: false }, B(32));
+tl.fromTo("#add1", { height: 0 }, { height: 47, duration: 0.4, ease: land(0.4), immediateRender: false }, B(32) + 3 * F);
+tl.fromTo("#add2", { height: 0 }, { height: 94, duration: 0.45, ease: land(0.45), immediateRender: false }, B(32) + 6 * F);
+tl.set("#right .file .st", { opacity: 1 }, B(32));
+cues.push([B(32), "sub"]);
+cap("#c5", B(32.5), B(36)); // half a beat after the diff, so the drop has one focal point
+drift("#right", B(32), B(38), 1.03);
+// next beat: the agent runs and reports
+tl.set("#lno", { opacity: 0 }, B(33));
+tl.set("#lfix", { opacity: 1 }, B(33));
+drift("#left", B(33), B(38), 1.04);
+tl.set("#stream", { opacity: 1, top: 54, height: 738 }, B(33));
+[54, 153, 252, 405, 513, 666, 720, 792].forEach((y, i) => tl.set("#stream", { top: y, height: 792 - y }, B(33) + 0.06 + i * 0.15));
+tl.set("#test", { opacity: 1 }, B(35));
+rise("#test .ok", B(35.5), 14, 0.32);
+cap("#c6", B(36), B(38));
+tl.set("#cursor2", { x: 420, y: 760, opacity: 1 }, B(36));
+move("#cursor2", B(36) + 0.05, 612, 1004, 0.42);
+click("#cursor2", B(37));
+
+// montage 17.97 - 22.46: the approved task across the app, one cut per kick
+off("#split", B(38));
+on("#app", B(38));
+show("#board", B(38));
+cut(B(38), 1590, 420, 1.9);
+cam(B(39), 960, 540, 1.0, 0.6);
+show("#search", B(40));
+cut(B(40), 600, 360, 1.45);
+show("#home", B(41));
+cut(B(41), 700, 400, 1.35);
+cam(B(42), 1300, 780, 1.6, 0.6);
+show("#notes", B(43));
+cut(B(43), 700, 560, 1.45);
+show("#palette", B(44));
+cut(B(44), 960, 600, 1.3);
+cam(B(45), 960, 760, 1.3, 0.6);
+show("#board", B(46));
+cut(B(46), 960, 540, 1.0);
+tl.fromTo("#app", { scale: 1, borderRadius: 0 }, { scale: 0.62, borderRadius: 18, duration: 0.55, ease: land(0.55), immediateRender: false }, B(46));
+cues.push([B(46) + 0.08, "whoosh"]);
+tl.to("#app", { scale: 0.6, duration: B(47.5) - B(46) - 0.55, ease: "none" }, B(46) + 0.55);
+off("#app", B(47.5));
+
+// S5 22.69 - 25.53: half a beat of silence, then one word per kick
+on("#s5", B(48));
+slam("#w1", B(48));
+off("#w1", B(49));
+slam("#w2", B(49));
+off("#w2", B(50));
+slam("#w3", B(50));
+tl.fromTo("#under", { scaleX: 0 }, { scaleX: 1, duration: 0.36, ease: land(0.36), immediateRender: false }, B(51));
+tl.to("#w3", { scale: 1.05, duration: B(52) - B(50) - 0.4, ease: "none" }, B(50) + 0.4);
+off("#w3", B(52));
+off("#under", B(52));
+slam("#w4", B(52), 1.1);
+drift("#w4", B(52) + 0.4, B(54), 1.03);
+
+// S6 25.53 - 28: logo, name, URL, hold
+slash(B(54));
+off("#s5", B(54));
+on("#s6", B(54));
+slam("#s6img", B(54), 1.25);
+slam("#s6name", B(54) + 3 * F, 1.18, false);
+tl.fromTo("#url", { width: "0ch" }, { width: "30ch", duration: 0.42, ease: "steps(30)", immediateRender: false }, B(55));
+for (let i = 0; i < 30; i++) cues.push([B(55) + (i * 0.42) / 30, "tick"]);
+rise("#free", B(56), 24, 0.4);
+drift("#s6card", B(54), 28, 1.045);
+
+flushCam();
+window.__timelines = window.__timelines || {};
+window.__timelines["main"] = tl;
+window.__cues = cues;
+    </script>
+  </body>
+</html>

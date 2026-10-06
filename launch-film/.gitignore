@@ -1,0 +1,8 @@
+renders/
+.hyperframes/
+.thumbnails/
+__pycache__/
+# generated audio: rebuilt by audio/generate.py and audio/build.py
+audio/candidates/
+audio/music.wav
+audio/guide.wav
