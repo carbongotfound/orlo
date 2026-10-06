@@ -430,6 +430,43 @@ impl Sink {
 }
 
 /// PATH lookup preferring a real .exe anywhere on PATH over shims.
+// Self-update for the portable exe: download the release asset, check it against the SHA-256
+// GitHub publishes for it, swap it in for the running exe (Windows allows renaming a running exe)
+// and restart. The frontend finds the release; this side only trusts this repo's download URLs.
+const RELEASES: &str = "https://github.com/carbongotfound/orlo/releases/download/";
+
+fn is_release_url(url: &str) -> bool {
+    url.starts_with(RELEASES) && url.ends_with(".exe") && !url.contains("..") && !url.contains(['?', '#', '\\'])
+}
+
+#[tauri::command]
+async fn install_update(app: AppHandle, url: String, sha256: String) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    if !is_release_url(&url) { return Err("Not an Orlo release download".into()) }
+    let exe = std::env::current_exe().map_err(e)?;
+    let new = exe.with_extension("new");
+    let old = exe.with_extension("old");
+    // curl.exe ships with Windows 10+, so no HTTP client is bundled for one download.
+    let out = Command::new("curl.exe")
+        .args(["-fsSL", "--proto", "=https", "--proto-redir", "=https", "-o"]).arg(&new).arg(&url)
+        .creation_flags(NO_WINDOW).output().map_err(e)?;
+    if !out.status.success() { return Err(format!("Download failed: {}", String::from_utf8_lossy(&out.stderr).trim())) }
+    let got = format!("{:x}", Sha256::digest(fs::read(&new).map_err(e)?));
+    if !got.eq_ignore_ascii_case(sha256.trim_start_matches("sha256:")) {
+        let _ = fs::remove_file(&new);
+        return Err("The download didn't match the release checksum, so nothing was changed".into());
+    }
+    let _ = fs::remove_file(&old);
+    fs::rename(&exe, &old).map_err(e)?;
+    if let Err(x) = fs::rename(&new, &exe) {
+        let _ = fs::rename(&old, &exe);
+        return Err(e(x));
+    }
+    Command::new(&exe).spawn().map_err(e)?;
+    app.exit(0);
+    Ok(())
+}
+
 fn which(name: &str) -> Option<PathBuf> {
     let dirs: Vec<PathBuf> = std::env::split_paths(&std::env::var_os("PATH")?).collect();
     let pathext = std::env::var("PATHEXT").unwrap_or(".COM;.EXE;.BAT;.CMD".into());
@@ -469,10 +506,12 @@ pub fn run() {
             let _ = c.execute("ALTER TABLE tasks ADD COLUMN effort TEXT NOT NULL DEFAULT ''", []);
             let _ = c.execute("ALTER TABLE tasks ADD COLUMN verdict TEXT NOT NULL DEFAULT ''", []);
             app.manage(Db(Mutex::new(c)));
+            // Left behind by install_update; the previous process may still hold it, then it goes next time.
+            if let Ok(exe) = std::env::current_exe() { let _ = fs::remove_file(exe.with_extension("old")); }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            lists, add_list, rename_list, delete_list, tasks, add_task, save_task, delete_task, events, clis, running, delegate, reply, stop
+            lists, add_list, rename_list, delete_list, tasks, add_task, save_task, delete_task, events, clis, running, delegate, reply, stop, install_update
         ])
         .build(tauri::generate_context!())
         .expect("error while building orlo")
@@ -488,6 +527,16 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_trusts_release_downloads() {
+        use super::is_release_url;
+        assert!(is_release_url("https://github.com/carbongotfound/orlo/releases/download/v1.1.0/Orlo-1.1.0-windows-x64.exe"));
+        assert!(!is_release_url("https://github.com/someone/orlo/releases/download/v1.1.0/Orlo.exe"));
+        assert!(!is_release_url("https://github.com/carbongotfound/orlo/releases/download/../../x/evil.exe"));
+        assert!(!is_release_url("https://github.com/carbongotfound/orlo/releases/download/v1/a.exe?x=.exe"));
+        assert!(!is_release_url("http://github.com/carbongotfound/orlo/releases/download/v1/a.exe"));
+    }
+
     use super::*;
 
     #[test]

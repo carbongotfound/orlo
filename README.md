@@ -25,7 +25,7 @@ Write a task, hand it to Claude Code, Codex or Grok, then review and approve the
   - Copying always gives you the raw Markdown.
 - **Notifications:** a bell inside the app plus Windows toasts when an agent finishes or needs you, and a daily reminder for tasks that are due.
 - **Command menu:** <kbd>Ctrl</kbd>+<kbd>K</kbd> searches everything and runs any command.
-- **Local-first:** everything lives in a SQLite file on your PC. There's no account, no server and no telemetry.
+- **Local-first:** everything lives in a SQLite file on your PC. There's no account, no server and no telemetry. The only request Orlo itself makes is the update check against GitHub releases.
 
 | | |
 |---|---|
@@ -34,9 +34,12 @@ Write a task, hand it to Claude Code, Codex or Grok, then review and approve the
 
 ## Install
 
-1. Download `Orlo-<version>-windows-x64.exe` from [Releases](https://github.com/carbongotfound/orlo/releases/latest).
-2. Run it. Orlo is a single portable exe, so there's no installer. Pin it to Start or the taskbar if you like.
-3. Windows may show a SmartScreen warning because the build isn't code-signed. Click **More info → Run anyway**, or build it yourself from source (see below).
+1. Download from [Releases](https://github.com/carbongotfound/orlo/releases/latest):
+   - `Orlo-<version>-windows-x64-setup.exe` installs Orlo for your user with a Start Menu shortcut.
+   - `Orlo-<version>-windows-x64.exe` is the portable version: one file, nothing installed.
+2. Windows may show a SmartScreen warning because the build isn't code-signed. Click **More info → Run anyway**, or build it yourself from source (see below).
+
+**Updates:** Orlo checks GitHub for a new release at launch and every 6 hours, or when you pick **Check for updates** in the command menu (<kbd>Ctrl</kbd>+<kbd>K</kbd>). Click **Update** and it downloads the new exe, checks it against the SHA-256 that GitHub publishes for the release, swaps it in and restarts. Your data is untouched.
 
 **Requirements:**
 - Windows 10 or 11 (x64) with the [WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/). It's preinstalled on Windows 11.

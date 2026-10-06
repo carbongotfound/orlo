@@ -1,4 +1,5 @@
-# Builds the portable exe for a published release and attaches it.
+# Builds the portable exe and the setup exe for a published release and attaches both.
+# The in-app updater downloads Orlo-<version>-windows-x64.exe, so keep that name.
 name: Release
 on:
   release:
@@ -17,13 +18,15 @@ jobs:
         with: { node-version: 22, cache: pnpm }
       - uses: dtolnay/rust-toolchain@stable
       - run: pnpm install --frozen-lockfile
-      - run: pnpm tauri build --no-bundle
-      - name: Attach exe
+      - run: pnpm tauri build --bundles nsis
+      - name: Attach exes
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $v = "${{ github.event.release.tag_name }}".TrimStart("v")
           $exe = Get-ChildItem -Recurse -Filter orlo.exe -Path src-tauri/target/release, target/release -ErrorAction SilentlyContinue | Select-Object -First 1
+          $setup = Get-ChildItem -Recurse -Filter "*-setup.exe" -Path src-tauri/target/release/bundle, target/release/bundle -ErrorAction SilentlyContinue | Select-Object -First 1
           Copy-Item $exe.FullName "Orlo-$v-windows-x64.exe"
-          gh release upload "${{ github.event.release.tag_name }}" "Orlo-$v-windows-x64.exe" --clobber
+          Copy-Item $setup.FullName "Orlo-$v-windows-x64-setup.exe"
+          gh release upload "${{ github.event.release.tag_name }}" "Orlo-$v-windows-x64.exe" "Orlo-$v-windows-x64-setup.exe" --clobber

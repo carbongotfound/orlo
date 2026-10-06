@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.0 (2026-10-06)
+
+- **Updates:** Orlo checks GitHub releases at launch, every 6 hours and from the command menu. One click downloads the new version, verifies its SHA-256 and restarts.
+- **Installer:** releases now include a setup exe next to the portable one.
+- **Agent replies** render as Markdown (code, lists, bold, links) instead of raw text.
+
 ## 1.0.0 (2026-10-05)
 
 First public release.

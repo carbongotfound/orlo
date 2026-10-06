@@ -55,6 +55,7 @@ class Check extends WidgetType {
     if (this.on) s.dataset.on = ""
     s.onmousedown = (e) => {
       e.preventDefault()
+      if (view.state.readOnly) return
       const line = view.state.doc.lineAt(view.posAtDOM(s))
       const i = line.text.search(/\[[ xX]\]/)
       if (i >= 0) view.dispatch({ changes: { from: line.from + i + 1, to: line.from + i + 2, insert: this.on ? " " : "x" } })
@@ -346,4 +347,20 @@ export function MdEditor({ value, onChange, hint, className }: {
       <div ref={host} className="orlo-md min-h-0 flex-1 cursor-text" onClick={(e) => e.target === e.currentTarget && view.current?.focus()} />
     </div>
   )
+}
+
+// Read-only rendering of Markdown, the same look as the editor (agent replies).
+export function MdView({ text }: { text: string }) {
+  const host = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const v = new EditorView({
+      parent: host.current!,
+      state: EditorState.create({
+        doc: text,
+        extensions: [markdown({ base: markdownLanguage }), live, EditorView.lineWrapping, EditorState.readOnly.of(true), EditorView.editable.of(false)],
+      }),
+    })
+    return () => v.destroy()
+  }, [text])
+  return <div ref={host} className="orlo-md orlo-md-view" />
 }

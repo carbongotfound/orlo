@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react"
+import { getVersion } from "@tauri-apps/api/app"
 import { invoke } from "@tauri-apps/api/core"
 import { listen } from "@tauri-apps/api/event"
 import { getCurrentWindow } from "@tauri-apps/api/window"
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification"
 import {
-  ArrowUpRight, Bell, Bot, CalendarDays, Check, CircleCheck, Columns3, Copy, CornerDownLeft, Ellipsis, FileText, Hash,
+  ArrowUpRight, Bell, Bot, CalendarDays, Check, CircleCheck, Columns3, Copy, CornerDownLeft, Download, Ellipsis, FileText, Hash,
   LayoutDashboard, ListTodo, MessageSquareText, Minus, Pencil, Plus, Rows3, Search, Sparkles, Square, Star, Tag, Trash2,
   TriangleAlert, Wrench, X,
 } from "lucide-react"
@@ -12,7 +13,7 @@ import { toast } from "sonner"
 import { cn } from "cn"
 import { Toaster } from "@/components/ui/sonner"
 import { AgentIcon } from "@/components/agent-icon"
-import { MdEditor, plain } from "@/components/md-editor"
+import { MdEditor, MdView, plain } from "@/components/md-editor"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Calendar } from "@/components/ui/calendar"
@@ -189,6 +190,8 @@ export default function App() {
     refresh()
     call<Cli[]>("clis").then((c) => setClis(c ?? []))
     requestAnimationFrame(() => win.show())
+    const first = import.meta.env.DEV ? 0 : window.setTimeout(() => checkUpdate(false), 5000)
+    const every = import.meta.env.DEV ? 0 : window.setInterval(() => checkUpdate(false), 6 * 3600_000)
     const un = listen<Ev>("agent", ({ payload: ev }) => {
       if (["prompt", "reply", "end", "verdict"].includes(ev.kind)) refresh()
       const name = tasksRef.current.find((t) => t.id === ev.task_id)?.title ?? "Task"
@@ -202,7 +205,7 @@ export default function App() {
       setLive("")
       setThread((t) => [...t, ev])
     })
-    return () => void un.then((f) => f())
+    return () => { clearTimeout(first); clearInterval(every); un.then((f) => f()) }
   }, [])
 
   // Once a day: a reminder for what is due, in the bell and as a Windows notification.
@@ -452,7 +455,7 @@ export default function App() {
         open={palette} setOpen={setPalette} tasks={tasks} lists={lists} tags={allTags} layout={layout}
         run={{
           newTask: () => focusNew(mode === "note" ? "tasks" : undefined), newNote: () => focusNew("notes"), go,
-          open: openTask, setLayout, intro: () => setIntro(true),
+          open: openTask, setLayout, intro: () => setIntro(true), update: () => checkUpdate(true),
         }}
       />
       <Toaster position="bottom-right" />
@@ -1184,9 +1187,47 @@ function Bells({ notifs, unread, setNotifs, openTask }: {
   )
 }
 
+// Updates come from GitHub releases. The check runs at launch, every 6 hours and from the palette;
+// "Update" downloads the new exe, checks its SHA-256 and restarts Orlo (install_update in lib.rs).
+const REPO = "carbongotfound/orlo"
+type Release = { tag_name: string; html_url: string; assets: { name: string; browser_download_url: string; digest?: string }[] }
+
+const newer = (a: string, b: string) => {
+  const x = a.split(".").map(Number), y = b.split(".").map(Number)
+  for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0)
+  return false
+}
+
+async function checkUpdate(manual: boolean) {
+  try {
+    const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`)
+    if (!res.ok) throw new Error(String(res.status))
+    const r: Release = await res.json()
+    const [v, mine] = [r.tag_name.replace(/^v/, ""), await getVersion()]
+    if (!newer(v, mine)) return void (manual && toast.success(`Orlo ${mine} is the latest version`))
+    const exe = r.assets.find((a) => a.name === `Orlo-${v}-windows-x64.exe`)
+    toast(`Orlo ${v} is available`, {
+      id: "update",
+      duration: Infinity,
+      closeButton: true,
+      description: exe?.digest ? `You have ${mine}. Updating restarts Orlo and stops running agents.` : `Download it from github.com/${REPO}/releases`,
+      action: exe?.digest ? {
+        label: "Update",
+        onClick: async () => {
+          toast.loading(`Downloading Orlo ${v}…`, { id: "update", duration: Infinity, description: undefined })
+          try { await invoke("install_update", { url: exe.browser_download_url, sha256: exe.digest }) }
+          catch (e) { toast.error("Update failed", { id: "update", duration: 8000, description: String(e) }) }
+        },
+      } : undefined,
+    })
+  } catch {
+    if (manual) toast.error("Couldn't reach GitHub to check for updates")
+  }
+}
+
 function Palette({ open, setOpen, tasks, lists, tags, layout, run }: {
   open: boolean; setOpen: (b: boolean) => void; tasks: Task[]; lists: List[]; tags: string[]; layout: Layout
-  run: { newTask: () => void; newNote: () => void; go: (v: View) => void; open: (t: Task) => void; setLayout: (l: Layout) => void; intro: () => void }
+  run: { newTask: () => void; newNote: () => void; go: (v: View) => void; open: (t: Task) => void; setLayout: (l: Layout) => void; intro: () => void; update: () => void }
 }) {
   const [q, setQ] = useState("")
   const act = (fn: () => void) => () => { setOpen(false); setQ(""); fn() }
@@ -1225,6 +1266,7 @@ function Palette({ open, setOpen, tasks, lists, tags, layout, run }: {
           </CommandGroup>
           <CommandGroup heading="Help">
             <CommandItem onSelect={act(run.intro)}><Sparkles />Show the Orlo introduction</CommandItem>
+            <CommandItem onSelect={act(run.update)}><Download />Check for updates</CommandItem>
           </CommandGroup>
           <CommandGroup heading="View">
             <CommandItem onSelect={act(() => run.setLayout(layout === "list" ? "board" : "list"))}>
@@ -1418,7 +1460,7 @@ function Activity({ ev, agent }: { ev: Ev; agent: string }) {
         <Message>
           <MessageContent>
             <MessageHeader className="flex items-center gap-1.5 px-0"><AgentIcon name={agent.toLowerCase()} className="size-3.5" />{agent} Agent</MessageHeader>
-            <Bubble variant="ghost"><BubbleContent className="whitespace-pre-wrap">{text}</BubbleContent></Bubble>
+            <Bubble variant="ghost"><BubbleContent><MdView text={text} /></BubbleContent></Bubble>
           </MessageContent>
         </Message>
       ) : null
