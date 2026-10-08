@@ -6,7 +6,11 @@ on:
 
 jobs:
   check:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -19,3 +23,10 @@ jobs:
       - run: pnpm build
       - run: cargo test
         working-directory: src-tauri
+      # On the Mac, also build the .app so a broken bundle shows up before a release does.
+      - if: runner.os == 'macOS'
+        run: |
+          pnpm tauri build --bundles app
+          app=$(find src-tauri/target target -name Orlo.app -maxdepth 5 2>/dev/null | head -1)
+          ls "$app/Contents/MacOS"
+          "$app"/Contents/MacOS/* help

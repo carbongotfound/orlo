@@ -6,13 +6,14 @@ import { getCurrentWindow } from "@tauri-apps/api/window"
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification"
 import {
   ArrowUpRight, Bell, Bot, CalendarDays, Check, CircleCheck, Columns3, Copy, CornerDownLeft, Download, Ellipsis, FileText, Hash,
-  LayoutDashboard, ListTodo, MessageSquareText, Minus, Pencil, Plus, Rows3, Search, Sparkles, Square, Star, Tag, Trash2,
+  CodeXml, FolderOpen, LayoutDashboard, ListTodo, MessageSquareText, Minus, Pencil, Plus, Rows3, Search, Sparkles, Square, Star, Tag, Trash2,
   TriangleAlert, Wrench, X,
 } from "lucide-react"
 import { toast } from "sonner"
 import { cn } from "cn"
 import { Toaster } from "@/components/ui/sonner"
 import { AgentIcon } from "@/components/agent-icon"
+import { CodeView } from "@/components/code-view"
 import { MdEditor, MdView, plain } from "@/components/md-editor"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -26,7 +27,7 @@ import {
   ContextMenu, ContextMenuCheckboxItem, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuShortcut,
   ContextMenuSub, ContextMenuSubContent, ContextMenuSubTrigger, ContextMenuTrigger,
 } from "@/components/ui/context-menu"
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput, InputGroupTextarea } from "@/components/ui/input-group"
 import { Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle } from "@/components/ui/item"
@@ -52,13 +53,14 @@ type List = { id: number; name: string }
 type Task = {
   id: number; title: string; notes: string; due: string | null; list_id: number | null; status: string
   agent: string | null; session_id: string | null; tags: string; kind: string; model: string; effort: string; verdict: string
+  cwd: string | null
 }
 type Ev = { task_id: number; kind: string; text: string }
 type Cli = { name: string; path: string | null; cap: string }
 type Mode = "task" | "note"
 type Layout = "list" | "board"
 type Pick = { agent: string; model: string; effort: string }
-type View = "home" | "tasks" | "notes" | number | `#${string}`
+type View = "home" | "tasks" | "notes" | "code" | number | `#${string}`
 type Notif = { id: number; task_id: number | null; title: string; text: string; tone: Tone; at: number; read: boolean }
 type Tone = "work" | "review" | "warn" | "done" | "idle"
 type Ctx = {
@@ -81,7 +83,12 @@ const withTag = (t: Task, tag: string): Task => {
   return { ...t, tags: (ts.includes(tag) ? ts.filter((x) => x !== tag) : [...ts, tag]).join(",") }
 }
 const hue = (s: string) => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7)
-const dot = (g: string) => `oklch(0.72 0.14 ${hue(g)})`
+const autoDot = (g: string) => `oklch(0.72 0.14 ${hue(g)})`
+// Colors picked in the sidebar (tags table); App refreshes this before each render, every other tag keeps its auto color.
+let tagColors: Record<string, string> = {}
+const dot = (g: string) => tagColors[g] ?? autoDot(g)
+const SWATCHES = ["#ef4444", "#f97316", "#eab308", "#22c55e", "#14b8a6", "#3b82f6", "#8b5cf6", "#ec4899", "#94a3b8"]
+const MAC = navigator.userAgent.includes("Mac")
 const TEMPLATE_TAGS = ["Work", "Personal", "Urgent", "Errand", "Idea"]
 // Model names each CLI accepts; "default" leaves the CLI's own choice.
 const MODELS: Record<string, string[]> = {
@@ -173,12 +180,18 @@ export default function App() {
   const tasksRef = useRef(tasks)
   tasksRef.current = tasks
   const mode: Mode = view === "notes" ? "note" : "task"
+  const [codeRoot, setCodeRoot] = useState<string | null>(() => store.get("orlo.codeRoot", null))
+  const [tick, setTick] = useState(0)
+  useEffect(() => store.set("orlo.codeRoot", codeRoot), [codeRoot])
 
   const refresh = async () => {
     setTasks((await call<Task[]>("tasks")) ?? [])
     setRunning((await call<number[]>("running")) ?? [])
   }
   const loadLists = async () => setLists((await call<List[]>("lists")) ?? [])
+  const [colors, setColors] = useState<Record<string, string>>({})
+  tagColors = colors
+  const loadColors = async () => setColors((await call<Record<string, string>>("tag_colors")) ?? {})
   const notify = (n: Omit<Notif, "id" | "at" | "read">) =>
     setNotifs((ns) => [{ ...n, id: Date.now() + Math.random(), at: Date.now(), read: false }, ...ns].slice(0, 50))
 
@@ -187,13 +200,17 @@ export default function App() {
 
   useEffect(() => {
     loadLists()
+    loadColors()
     refresh()
     call<Cli[]>("clis").then((c) => setClis(c ?? []))
+    // An agent may have run `orlo done` from a terminal meanwhile.
+    const focus = win.onFocusChanged(({ payload }) => { if (payload) refresh() })
     requestAnimationFrame(() => win.show())
     const first = import.meta.env.DEV ? 0 : window.setTimeout(() => checkUpdate(false), 5000)
     const every = import.meta.env.DEV ? 0 : window.setInterval(() => checkUpdate(false), 6 * 3600_000)
     const un = listen<Ev>("agent", ({ payload: ev }) => {
       if (["prompt", "reply", "end", "verdict"].includes(ev.kind)) refresh()
+      if (ev.kind === "end") setTick((n) => n + 1)
       const name = tasksRef.current.find((t) => t.id === ev.task_id)?.title ?? "Task"
       if (ev.kind === "verdict") {
         const text = ev.text === "complete" ? "Finished and checked it off" : ev.text === "input" ? "Has a question for you" : "Finished — ready for your review"
@@ -205,26 +222,40 @@ export default function App() {
       setLive("")
       setThread((t) => [...t, ev])
     })
-    return () => { clearTimeout(first); clearInterval(every); un.then((f) => f()) }
+    return () => { clearTimeout(first); clearInterval(every); un.then((f) => f()); focus.then((f) => f()) }
   }, [])
 
-  // Once a day: a reminder for what is due, in the bell and as a Windows notification.
-  const reminded = useRef(false)
+  // Due reminders, in the bell and as a system notification with sound: overdue, due today and due tomorrow.
+  // Each task is announced once per day and bucket, so a new day (even with Orlo left open) pings again.
   useEffect(() => {
-    if (reminded.current || !tasks.length) return
-    reminded.current = true
-    if (store.get("orlo.reminded", "") === today()) return
-    store.set("orlo.reminded", today())
-    const n = tasks.filter((t) => t.kind === "task" && t.status !== "done" && t.due != null && t.due <= today()).length
-    if (!n) return
-    const body = `${n} task${n > 1 ? "s" : ""} due today or overdue`
-    notify({ task_id: null, title: "Today", text: body, tone: "idle" })
-    ;(async () => {
-      let ok = await isPermissionGranted()
-      if (!ok) ok = (await requestPermission()) === "granted"
-      if (ok) sendNotification({ title: "Orlo", body })
-    })()
-  }, [tasks])
+    const check = () => {
+      const t0 = today(), t1 = inDays(1)
+      const seen = store.get<string[]>("orlo.dueSeen", []).filter((k) => k.startsWith(t0))
+      const open = tasksRef.current.filter((t) => t.kind === "task" && t.status !== "done" && t.due != null && t.due <= t1)
+      const buckets: [string, Task[]][] = [
+        ["Overdue", open.filter((t) => t.due! < t0)],
+        ["Due today", open.filter((t) => t.due === t0)],
+        ["Due tomorrow", open.filter((t) => t.due === t1)],
+      ]
+      const fresh: string[] = []
+      for (const [label, ts] of buckets) {
+        const news = ts.filter((t) => !seen.includes(`${t0}:${label}:${t.id}`))
+        if (!news.length) continue
+        fresh.push(...news.map((t) => `${t0}:${label}:${t.id}`))
+        const body = news.length === 1 ? news[0].title : `${news.length} tasks: ${news.slice(0, 3).map((t) => t.title).join(", ")}${news.length > 3 ? "…" : ""}`
+        notify({ task_id: news.length === 1 ? news[0].id : null, title: label, text: body, tone: label === "Overdue" ? "warn" : "idle" })
+        ;(async () => {
+          let ok = await isPermissionGranted()
+          if (!ok) ok = (await requestPermission()) === "granted"
+          if (ok) sendNotification({ title: `Orlo · ${label}`, body, sound: "Default" })
+        })()
+      }
+      if (fresh.length) store.set("orlo.dueSeen", [...seen, ...fresh])
+    }
+    const first = window.setTimeout(check, 3000)
+    const every = window.setInterval(check, 10 * 60_000)
+    return () => { clearTimeout(first); clearInterval(every) }
+  }, [])
 
   useEffect(() => {
     setLive("")
@@ -257,6 +288,7 @@ export default function App() {
   const task = tasks.find((t) => t.id === sel) ?? null
   const searching = !!q.trim()
   const home = view === "home" && !searching
+  const code = view === "code" && !searching
   const viewName = searching ? "Search" : typeof view === "number" ? lists.find((l) => l.id === view)?.name ?? "" : view[0] === "#" ? view : title(view)
 
   const go = (v: View) => {
@@ -376,7 +408,18 @@ export default function App() {
 
   const ctx: Ctx = { clis, lists, tags: allTags, running, sel, open: openTask, toggle, save, remove, delegate, fresh }
   const unread = notifs.filter((n) => !n.read).length
-  const showBoard = mode === "task" && layout === "board" && !home
+  const showBoard = mode === "task" && layout === "board" && !home && !code
+  // The Code view's ask box: a task that runs in the open project folder, followed in the side panel like any other.
+  const askInCode = async (prompt: string, agent: string) => {
+    const line = prompt.split("\n")[0]
+    const t = await call<Task>("add_task", { title: line, kind: "task", listId: null, due: null, cwd: codeRoot })
+    if (!t) return
+    // The run prompt is title + notes, so notes carry only what the title doesn't.
+    t.notes = prompt.slice(line.length).trim()
+    if (t.notes) await call("save_task", { task: t })
+    setTasks((ts) => [...ts, t])
+    delegate(t, { ...noPick, agent })
+  }
   const composer = <Composer key={mode} kind={mode} clis={clis} tags={allTags} inputRef={newRef} onAdd={addTask} />
   const openById = (id: number) => { const t = tasks.find((x) => x.id === id); if (t) openTask(t) }
 
@@ -386,6 +429,7 @@ export default function App() {
         <AppSidebar
           lists={lists} tags={allTags} clis={clis} tasks={tasks} running={running} view={searching ? null : view}
           q={q} setQ={setQ} searchRef={searchRef} go={go} reload={async () => { await loadLists(); refresh() }}
+          openTask={openTask} reloadTags={async () => { await loadColors(); refresh() }}
           newTask={() => focusNew(mode === "note" ? "tasks" : undefined)} openPalette={() => setPalette(true)}
         />
         <SidebarInset className="min-h-0 min-w-0">
@@ -393,9 +437,9 @@ export default function App() {
             <SidebarTrigger />
             <Separator orientation="vertical" className="mx-1 data-vertical:h-4 data-vertical:self-center" />
             <h1 className="pointer-events-none truncate text-sm font-medium">{home ? "Home" : viewName}</h1>
-            {!home && <Badge variant="secondary" className="pointer-events-none tabular-nums">{visible.filter((t) => t.status !== "done").length}</Badge>}
+            {!home && !code && <Badge variant="secondary" className="pointer-events-none tabular-nums">{visible.filter((t) => t.status !== "done").length}</Badge>}
             <div className="ml-auto flex items-center gap-1">
-              {showBoard || (mode === "task" && !home) ? (
+              {mode === "task" && !home && !code ? (
                 <ToggleGroup value={[layout]} onValueChange={(v) => v[0] && setLayout(v[0] as Layout)} variant="outline" size="sm" spacing={0}>
                   <ToggleGroupItem value="list" aria-label="List"><Rows3 /> List</ToggleGroupItem>
                   <ToggleGroupItem value="board" aria-label="Board"><Columns3 /> Board</ToggleGroupItem>
@@ -407,7 +451,11 @@ export default function App() {
           </header>
 
           <div className="flex min-h-0 flex-1">
-            <main key={`${String(view)}-${layout}`} className="@container/main orlo-enter min-w-0 flex-1 overflow-y-auto">
+            {/* Stays mounted while you visit other views, so open tabs and unsaved edits survive. */}
+            <div className={cn("min-w-0 flex-1 overflow-hidden", !code && "hidden")}>
+              <CodeView root={codeRoot} setRoot={setCodeRoot} clis={clis} onAsk={askInCode} tick={tick} />
+            </div>
+            <main key={`${String(view)}-${layout}`} className={cn("@container/main orlo-enter min-w-0 flex-1 overflow-y-auto", code && "hidden")}>
               {home ? (
                 <Home tasks={tasks} ctx={ctx} go={go} setLayout={setLayout} composer={composer} />
               ) : (
@@ -480,7 +528,9 @@ function Tip({ label, children }: { label: React.ReactNode; children: React.Reac
   )
 }
 
+// macOS keeps its own traffic lights (tauri.macos.conf.json), so these are Windows-only.
 function WindowControls() {
+  if (MAC) return <div className="w-3" />
   const btn = "grid h-12 w-11 place-items-center text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
   return (
     <div className="ml-1 flex self-stretch">
@@ -495,8 +545,21 @@ function AppSidebar(p: {
   lists: List[]; tags: string[]; clis: Cli[]; tasks: Task[]; running: number[]; view: View | null
   q: string; setQ: (s: string) => void; searchRef: React.RefObject<HTMLInputElement | null>
   go: (v: View) => void; reload: () => void; newTask: () => void; openPalette: () => void
+  openTask: (t: Task) => void; reloadTags: () => Promise<void>
 }) {
   const [editing, setEditing] = useState<number | "new" | null>(null)
+  const [editingTag, setEditingTag] = useState<string | null>(null)
+  const renameTag = async (from: string, to: string) => {
+    setEditingTag(null)
+    if (!to.trim() || to.trim() === from) return
+    const name = await call<string>("rename_tag", { from, to })
+    await p.reloadTags()
+    if (name && p.view === `#${from}`) p.go(`#${name}`)
+  }
+  const colorTag = async (name: string, color: string | null) => {
+    await call("set_tag_color", { name, color })
+    p.reloadTags()
+  }
   const t0 = today()
   // The badge counts what wants attention now: due or overdue, or an agent waiting on you.
   const now = p.tasks.filter((t) => t.kind === "task" && t.status !== "done" && ((t.due != null && t.due <= t0) || needsYou(t, p.running.includes(t.id))))
@@ -504,6 +567,7 @@ function AppSidebar(p: {
     ["home", "Home", <LayoutDashboard />, 0],
     ["tasks", "Tasks", <ListTodo />, now.length],
     ["notes", "Notes", <FileText />, 0],
+    ["code", "Code", <CodeXml />, 0],
   ]
   const commit = async (v: string, id: number | "new") => {
     setEditing(null)
@@ -532,7 +596,7 @@ function AppSidebar(p: {
 
   return (
     <Sidebar collapsible="icon">
-      <SidebarHeader data-tauri-drag-region>
+      <SidebarHeader data-tauri-drag-region className={cn(MAC && "pt-9")}>
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton size="lg" onClick={() => p.go("home")}>
@@ -614,12 +678,46 @@ function AppSidebar(p: {
             <SidebarGroupLabel>Tags</SidebarGroupLabel>
             <SidebarGroupContent>
               <SidebarMenu>
-                {p.tags.map((g) => (
+                {p.tags.map((g) => editingTag === g ? (
+                  <SidebarMenuItem key={`edit-${g}`}>
+                    <SidebarInput
+                      autoFocus defaultValue={g} placeholder="Tag name"
+                      onBlur={(e) => renameTag(g, e.currentTarget.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") e.currentTarget.blur()
+                        if (e.key === "Escape") { e.stopPropagation(); setEditingTag(null) }
+                      }}
+                    />
+                  </SidebarMenuItem>
+                ) : (
                   <SidebarMenuItem key={g}>
-                    <SidebarMenuButton tooltip={g} isActive={p.view === `#${g}`} onClick={() => p.go(`#${g}`)}>
+                    <SidebarMenuButton tooltip={g} isActive={p.view === `#${g}`} onClick={() => p.go(`#${g}`)} onDoubleClick={() => setEditingTag(g)}>
                       <span className="grid size-4 place-items-center"><span className="size-2 rounded-full" style={{ background: dot(g) }} /></span>
                       <span>{g}</span>
                     </SidebarMenuButton>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger render={<SidebarMenuAction showOnHover />}><Ellipsis /><span className="sr-only">More</span></DropdownMenuTrigger>
+                      <DropdownMenuContent side="right" align="start" className="w-48">
+                        <DropdownMenuItem onClick={() => setEditingTag(g)}><Pencil />Rename</DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <div className="px-2 pt-1 pb-1.5 text-xs text-muted-foreground">Color</div>
+                        <div className="grid grid-cols-5 gap-1.5 px-2 pb-2">
+                          {SWATCHES.map((c) => (
+                            <button
+                              key={c} aria-label={`Color ${c}`} onClick={() => colorTag(g, c)}
+                              className={cn("size-6 rounded-full ring-offset-2 ring-offset-popover hover:ring-2 hover:ring-ring", tagColors[g] === c && "ring-2 ring-foreground")}
+                              style={{ background: c }}
+                            />
+                          ))}
+                          <button
+                            aria-label="Automatic color" title="Automatic" onClick={() => colorTag(g, null)}
+                            className={cn("grid size-6 place-items-center rounded-full border text-[10px] text-muted-foreground hover:bg-muted", !tagColors[g] && "ring-2 ring-foreground ring-offset-2 ring-offset-popover")}
+                          >
+                            <span className="size-3 rounded-full" style={{ background: autoDot(g) }} />
+                          </button>
+                        </div>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </SidebarMenuItem>
                 ))}
               </SidebarMenu>
@@ -635,11 +733,13 @@ function AppSidebar(p: {
             const busy = p.tasks.filter((t) => t.agent === c.name && p.running.includes(t.id)).length
             return (
               <SidebarMenuItem key={c.name}>
-                <SidebarMenuButton size="sm" tooltip={c.path ? `${title(c.name)} · ${c.cap}` : `${title(c.name)} · not installed`} onClick={() => p.go("tasks")}>
-                  <AgentIcon name={c.name} className={cn(!c.path && "opacity-40")} />
-                  <span>{title(c.name)}</span>
-                  <span className={cn("ml-auto size-1.5 shrink-0 rounded-full", !c.path ? "bg-muted-foreground/40" : busy ? "animate-pulse bg-sky-400" : "bg-emerald-400")} />
-                </SidebarMenuButton>
+                <AgentTasks cli={c} tasks={p.tasks.filter((t) => t.agent === c.name)} running={p.running} open={p.openTask}>
+                  <SidebarMenuButton size="sm">
+                    <AgentIcon name={c.name} className={cn(!c.path && "opacity-40")} />
+                    <span>{title(c.name)}</span>
+                    <span className={cn("ml-auto size-1.5 shrink-0 rounded-full", !c.path ? "bg-muted-foreground/40" : busy ? "animate-pulse bg-sky-400" : "bg-emerald-400")} />
+                  </SidebarMenuButton>
+                </AgentTasks>
                 {busy > 0 && <SidebarMenuBadge className="right-5">{busy}</SidebarMenuBadge>}
               </SidebarMenuItem>
             )
@@ -648,6 +748,48 @@ function AppSidebar(p: {
       </SidebarFooter>
       <SidebarRail />
     </Sidebar>
+  )
+}
+
+// What one agent has finished, newest first, plus a line on what it's doing now.
+function AgentTasks({ cli, tasks, running, open, children }: {
+  cli: Cli; tasks: Task[]; running: number[]; open: (t: Task) => void; children: React.ReactElement
+}) {
+  const [show, setShow] = useState(false)
+  const done = tasks.filter((t) => t.status === "done").sort((a, b) => b.id - a.id)
+  const working = tasks.filter((t) => running.includes(t.id)).length
+  const waiting = tasks.filter((t) => needsYou(t, running.includes(t.id))).length
+  const now = [working && `${working} working`, waiting && `${waiting} waiting on you`].filter(Boolean).join(" · ")
+  return (
+    <Popover open={show} onOpenChange={setShow}>
+      <PopoverTrigger render={children} />
+      <PopoverContent side="right" align="end" className="w-80 gap-0 p-0">
+        <div className="flex items-center gap-2 border-b px-3 py-2.5">
+          <AgentIcon name={cli.name} />
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium">{title(cli.name)} Agent</p>
+            <p className="truncate text-xs text-muted-foreground">{cli.path ? now || cli.cap : "Not installed"}</p>
+          </div>
+          <Badge variant="secondary" className="tabular-nums">{done.length} done</Badge>
+        </div>
+        <div className="max-h-80 overflow-y-auto p-1">
+          {done.length ? done.map((t) => (
+            <button
+              key={t.id} onClick={() => { setShow(false); open(t) }}
+              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted"
+            >
+              <CircleCheck className="size-4 shrink-0 text-emerald-400" />
+              <span className="min-w-0 flex-1 truncate">{t.title}</span>
+              {t.verdict === "complete" && <span className="shrink-0 text-xs text-muted-foreground">by itself</span>}
+            </button>
+          )) : (
+            <p className="px-2 py-6 text-center text-xs text-muted-foreground">
+              {cli.path ? `Nothing completed by ${title(cli.name)} yet.` : `Install the ${cli.name} CLI and sign in to hand it tasks.`}
+            </p>
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
   )
 }
 
@@ -1205,7 +1347,8 @@ async function checkUpdate(manual: boolean) {
     const r: Release = await res.json()
     const [v, mine] = [r.tag_name.replace(/^v/, ""), await getVersion()]
     if (!newer(v, mine)) return void (manual && toast.success(`Orlo ${mine} is the latest version`))
-    const exe = r.assets.find((a) => a.name === `Orlo-${v}-windows-x64.exe`)
+    // The in-place swap is for the Windows exe; on a Mac the toast points at the release instead.
+    const exe = MAC ? undefined : r.assets.find((a) => a.name === `Orlo-${v}-windows-x64.exe`)
     toast(`Orlo ${v} is available`, {
       id: "update",
       duration: Infinity,
@@ -1223,6 +1366,14 @@ async function checkUpdate(manual: boolean) {
   } catch {
     if (manual) toast.error("Couldn't reach GitHub to check for updates")
   }
+}
+
+// Agents outside Orlo read tasks through the app's own exe: `orlo tasks`, `orlo show <id>`, `orlo done <id>`.
+async function copyCli() {
+  const exe = await call<string>("cli_path")
+  if (!exe) return
+  await navigator.clipboard.writeText(`"${exe}" tasks`)
+  toast.success("Copied the Orlo CLI command", { description: "Agents can run it to list tasks. Use show <id> for one task, done <id> to check it off, --json for JSON." })
 }
 
 function Palette({ open, setOpen, tasks, lists, tags, layout, run }: {
@@ -1267,6 +1418,7 @@ function Palette({ open, setOpen, tasks, lists, tags, layout, run }: {
           <CommandGroup heading="Help">
             <CommandItem onSelect={act(run.intro)}><Sparkles />Show the Orlo introduction</CommandItem>
             <CommandItem onSelect={act(run.update)}><Download />Check for updates</CommandItem>
+            <CommandItem value="copy agent cli command orlo tasks terminal" onSelect={act(copyCli)}><Copy />Copy CLI command for agents</CommandItem>
           </CommandGroup>
           <CommandGroup heading="View">
             <CommandItem onSelect={act(() => run.setLayout(layout === "list" ? "board" : "list"))}>
@@ -1348,6 +1500,7 @@ function Detail({ task, ctx, thread, live, isRunning, where, close, reply, stop 
               <Choice value={String(task.list_id ?? "none")} onChange={(v) => save({ ...task, list_id: v === "none" ? null : Number(v) })}
                 options={[["none", "No list"], ...ctx.lists.map((l): [string, string] => [String(l.id), l.name])]} />
             </Prop>
+            {task.cwd && <Prop icon={<FolderOpen />} label="Folder"><span className="truncate px-2 font-mono text-xs text-muted-foreground" title={task.cwd}>{task.cwd}</span></Prop>}
             <Prop icon={<Tag />} label="Tags">
               {own.map((g) => <TagBadge key={g} tag={g} onRemove={() => save(withTag(task, g))} />)}
               <TagPicker

@@ -12,6 +12,7 @@
     "core:window:allow-internal-toggle-maximize",
     "core:window:allow-close",
     "core:window:allow-show",
-    "notification:default"
+    "notification:default",
+    "dialog:allow-open"
   ]
 }
