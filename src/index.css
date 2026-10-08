@@ -179,3 +179,14 @@
 .orlo-md .md-check[data-on] { background: var(--primary); border-color: var(--primary); animation: orlo-pop 0.3s ease-out; }
 .orlo-md .md-check[data-on]::after { content: ""; width: 4px; height: 8px; margin-top: -2px; border: solid var(--primary-foreground); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); }
 .orlo-md .md-hr { display: inline-block; width: 100%; height: 1px; vertical-align: middle; background: var(--border); }
+
+/* Code view (src/components/code-view.tsx) */
+.orlo-code .cm-editor { height: 100%; font-size: 0.8125rem; background: var(--background); }
+.orlo-code .cm-editor.cm-focused { outline: none; }
+.orlo-code .cm-scroller { font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace; line-height: 1.6; }
+.orlo-code .cm-content { caret-color: var(--foreground); }
+.orlo-code .cm-cursor { border-left: 1.5px solid var(--foreground); }
+.orlo-code .cm-gutters { background: var(--background); border-right: 1px solid var(--border); color: var(--muted-foreground); }
+.orlo-code .cm-activeLine, .orlo-code .cm-activeLineGutter { background: color-mix(in oklch, var(--muted) 60%, transparent); }
+.orlo-code .cm-selectionBackground, .orlo-code .cm-focused .cm-selectionBackground { background: color-mix(in oklch, var(--sidebar-primary) 30%, transparent) !important; }
+.orlo-code .cm-matchingBracket { background: color-mix(in oklch, var(--sidebar-primary) 25%, transparent); outline: none; }

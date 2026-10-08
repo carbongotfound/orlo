@@ -1,4 +1,4 @@
-# Builds the portable exe and the setup exe for a published release and attaches both.
+# Builds the portable exe, the setup exe and the macOS dmg for a published release and attaches them.
 # The in-app updater downloads Orlo-<version>-windows-x64.exe, so keep that name.
 name: Release
 on:
@@ -30,3 +30,24 @@ jobs:
           Copy-Item $exe.FullName "Orlo-$v-windows-x64.exe"
           Copy-Item $setup.FullName "Orlo-$v-windows-x64-setup.exe"
           gh release upload "${{ github.event.release.tag_name }}" "Orlo-$v-windows-x64.exe" "Orlo-$v-windows-x64-setup.exe" --clobber
+
+  dmg:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "aarch64-apple-darwin,x86_64-apple-darwin" }
+      - run: pnpm install --frozen-lockfile
+      # One universal dmg for Apple silicon and Intel Macs.
+      - run: pnpm tauri build --target universal-apple-darwin --bundles dmg
+      - name: Attach dmg
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${{ github.event.release.tag_name }}"; v="${v#v}"
+          dmg=$(find src-tauri/target target -path "*universal-apple-darwin/release/bundle/dmg/*.dmg" 2>/dev/null | head -1)
+          cp "$dmg" "Orlo-$v-macos-universal.dmg"
+          gh release upload "${{ github.event.release.tag_name }}" "Orlo-$v-macos-universal.dmg" --clobber

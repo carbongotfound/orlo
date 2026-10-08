@@ -10,6 +10,8 @@ use std::{fs, thread, time::Duration};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
 use tauri_plugin_notification::NotificationExt;
 
+mod cli;
+
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
@@ -20,17 +22,21 @@ from the user (ask the question just above that line).";
 const CAP_MINUTES: u64 = 20;
 const CLAUDE_FLAGS: &[&str] = &[
     "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-    "--permission-mode", "acceptEdits", "--allowedTools", "Bash,Read,Edit",
+    "--permission-mode", "acceptEdits", "--allowedTools", "Bash,Read,Edit,Write,Glob,Grep",
     "--max-turns", "30", "--max-budget-usd", "1.50",
 ];
 // No --bare: it switches Claude Code to API-key-only auth, so a normal `claude /login` would read as "Not logged in".
+#[cfg_attr(not(windows), allow(dead_code))]
 const NO_WINDOW: u32 = 0x0800_0000;
+/// Every CLI Orlo can hand a task to, in sidebar order.
+const AGENTS: &[&str] = &["claude", "codex", "grok", "hermes", "gemini"];
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS lists(id INTEGER PRIMARY KEY, name TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS tasks(id INTEGER PRIMARY KEY, title TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '',
   due TEXT, list_id INTEGER, status TEXT NOT NULL DEFAULT 'open', agent TEXT, session_id TEXT);
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS tags(name TEXT PRIMARY KEY, color TEXT NOT NULL);
 ";
 
 struct Db(Mutex<Connection>);
@@ -44,6 +50,8 @@ struct List { id: i64, name: String }
 struct Task {
     id: i64, title: String, notes: String, due: Option<String>, list_id: Option<i64>,
     status: String, agent: Option<String>, session_id: Option<String>, tags: String, kind: String, model: String, effort: String, verdict: String,
+    /// A project folder the agent works in (from the Code view); None means its own folder under ~/Orlo.
+    cwd: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -56,17 +64,18 @@ fn e<E: ToString>(x: E) -> String { x.to_string() }
 
 /// Each delegated task gets its own folder here. ORLO_WORK overrides the default ~/Orlo.
 fn work_root() -> PathBuf {
+    let home = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     std::env::var_os("ORLO_WORK").map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default()).join("Orlo"))
+        .unwrap_or_else(|| PathBuf::from(std::env::var_os(home).unwrap_or_default()).join("Orlo"))
 }
 
 fn read_task(r: &rusqlite::Row) -> rusqlite::Result<Task> {
     Ok(Task {
         id: r.get(0)?, title: r.get(1)?, notes: r.get(2)?, due: r.get(3)?, list_id: r.get(4)?,
-        status: r.get(5)?, agent: r.get(6)?, session_id: r.get(7)?, tags: r.get(8)?, kind: r.get(9)?, model: r.get(10)?, effort: r.get(11)?, verdict: r.get(12)?,
+        status: r.get(5)?, agent: r.get(6)?, session_id: r.get(7)?, tags: r.get(8)?, kind: r.get(9)?, model: r.get(10)?, effort: r.get(11)?, verdict: r.get(12)?, cwd: r.get(13)?,
     })
 }
-const TASK_COLS: &str = "id, title, notes, due, list_id, status, agent, session_id, tags, kind, model, effort, verdict";
+const TASK_COLS: &str = "id, title, notes, due, list_id, status, agent, session_id, tags, kind, model, effort, verdict, cwd";
 
 #[tauri::command]
 fn lists(db: State<Db>) -> Result<Vec<List>, String> {
@@ -96,6 +105,113 @@ fn delete_list(db: State<Db>, id: i64) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn tag_colors(db: State<Db>) -> Result<HashMap<String, String>, String> {
+    let c = db.0.lock().unwrap();
+    let mut s = c.prepare("SELECT name, color FROM tags").map_err(e)?;
+    let r = s.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map_err(e)?.collect::<Result<_, _>>().map_err(e);
+    r
+}
+
+/// None goes back to the automatic color.
+#[tauri::command]
+fn set_tag_color(db: State<Db>, name: String, color: Option<String>) -> Result<(), String> {
+    let c = db.0.lock().unwrap();
+    match color {
+        Some(col) if col.len() == 7 && col.starts_with('#') && col[1..].chars().all(|x| x.is_ascii_hexdigit()) => {
+            c.execute("INSERT OR REPLACE INTO tags(name, color) VALUES (?1, ?2)", params![name, col]).map(|_| ()).map_err(e)
+        }
+        Some(_) => Err("Colors are #rrggbb".into()),
+        None => c.execute("DELETE FROM tags WHERE name=?1", [name]).map(|_| ()).map_err(e),
+    }
+}
+
+/// The comma-separated tags column with `from` renamed to `to` (merged if it's already there); None if `from` isn't in it.
+fn retag(tags: &str, from: &str, to: &str) -> Option<String> {
+    let ts: Vec<&str> = tags.split(',').map(str::trim).filter(|x| !x.is_empty()).collect();
+    if !ts.contains(&from) {
+        return None;
+    }
+    let mut out: Vec<&str> = vec![];
+    for t in ts.into_iter().map(|t| if t == from { to } else { t }) {
+        if !out.contains(&t) { out.push(t) }
+    }
+    Some(out.join(","))
+}
+
+#[tauri::command]
+fn rename_tag(db: State<Db>, from: String, to: String) -> Result<String, String> {
+    let to = to.trim().trim_start_matches('#').replace(',', " ").trim().to_string();
+    if to.is_empty() { return Err("A tag needs a name".into()) }
+    let mut c = db.0.lock().unwrap();
+    let tx = c.transaction().map_err(e)?;
+    let rows: Vec<(i64, String)> = {
+        let mut s = tx.prepare("SELECT id, tags FROM tasks WHERE tags != ''").map_err(e)?;
+        let r = s.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map_err(e)?.collect::<Result<_, _>>().map_err(e)?;
+        r
+    };
+    for (id, tags) in rows {
+        if let Some(t) = retag(&tags, &from, &to) {
+            tx.execute("UPDATE tasks SET tags=?1 WHERE id=?2", params![t, id]).map_err(e)?;
+        }
+    }
+    // A picked color moves with the tag, unless the name it merges into already has one.
+    tx.execute("UPDATE OR IGNORE tags SET name=?1 WHERE name=?2", params![to, from]).map_err(e)?;
+    tx.execute("DELETE FROM tags WHERE name=?1 AND name!=?2", params![from, to]).map_err(e)?;
+    tx.commit().map_err(e)?;
+    Ok(to)
+}
+
+// The Code view's file access. It edits the user's own project files, nothing more: the folders where agent CLIs
+// keep their logins are off limits, so Orlo never reads or writes a token even when someone browses there.
+const PRIVATE: &[&str] = &[".claude", ".codex", ".grok", ".gemini", ".hermes", ".ssh", ".aws", ".config/gcloud", ".config/gh"];
+
+fn editable(path: &str) -> Result<PathBuf, String> {
+    let p = std::fs::canonicalize(path).map_err(|x| format!("{path}: {x}"))?;
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).and_then(|h| std::fs::canonicalize(h).ok());
+    if let Some(h) = home {
+        if PRIVATE.iter().any(|d| p.starts_with(h.join(d))) {
+            return Err("Orlo doesn't open the folders where agent CLIs and other tools keep their sign-ins.".into());
+        }
+    }
+    Ok(p)
+}
+
+#[derive(Serialize)]
+struct Entry { name: String, dir: bool }
+
+#[tauri::command]
+fn list_dir(path: String) -> Result<Vec<Entry>, String> {
+    let mut out: Vec<Entry> = fs::read_dir(editable(&path)?).map_err(e)?
+        .filter_map(|x| x.ok())
+        .map(|x| Entry { name: x.file_name().to_string_lossy().into_owned(), dir: x.file_type().is_ok_and(|t| t.is_dir()) })
+        .filter(|x| !matches!(x.name.as_str(), ".git" | "node_modules" | "target" | ".DS_Store"))
+        .collect();
+    out.sort_by(|a, b| b.dir.cmp(&a.dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+    Ok(out)
+}
+
+#[tauri::command]
+fn read_text(path: String) -> Result<String, String> {
+    let p = editable(&path)?;
+    if fs::metadata(&p).map_err(e)?.len() > 4 << 20 { return Err("That file is over 4 MB, too big to edit here.".into()) }
+    String::from_utf8(fs::read(&p).map_err(e)?).map_err(|_| "That looks like a binary file.".into())
+}
+
+/// Writes a file, creating it (not its folder) when it's new.
+#[tauri::command]
+fn write_text(path: String, text: String) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    let dir = editable(&p.parent().ok_or("No folder")?.to_string_lossy())?;
+    fs::write(dir.join(p.file_name().ok_or("No file name")?), text).map_err(e)
+}
+
+/// The exe agents can run as a CLI (`orlo tasks`, `orlo show 12`…), for the palette's copy command.
+#[tauri::command]
+fn cli_path() -> Result<String, String> {
+    std::env::current_exe().map(|p| p.display().to_string()).map_err(e)
+}
+
+#[tauri::command]
 fn tasks(db: State<Db>) -> Result<Vec<Task>, String> {
     let c = db.0.lock().unwrap();
     let mut s = c.prepare(&format!("SELECT {TASK_COLS} FROM tasks ORDER BY status='done', id")).map_err(e)?;
@@ -104,9 +220,9 @@ fn tasks(db: State<Db>) -> Result<Vec<Task>, String> {
 }
 
 #[tauri::command]
-fn add_task(db: State<Db>, title: String, list_id: Option<i64>, due: Option<String>, kind: String) -> Result<Task, String> {
+fn add_task(db: State<Db>, title: String, list_id: Option<i64>, due: Option<String>, kind: String, cwd: Option<String>) -> Result<Task, String> {
     let c = db.0.lock().unwrap();
-    c.execute("INSERT INTO tasks(title, list_id, due, kind) VALUES (?1, ?2, ?3, ?4)", params![title, list_id, due, kind]).map_err(e)?;
+    c.execute("INSERT INTO tasks(title, list_id, due, kind, cwd) VALUES (?1, ?2, ?3, ?4, ?5)", params![title, list_id, due, kind, cwd]).map_err(e)?;
     c.query_row(&format!("SELECT {TASK_COLS} FROM tasks WHERE id=?1"), [c.last_insert_rowid()], read_task).map_err(e)
 }
 
@@ -142,8 +258,9 @@ fn events(db: State<Db>, task_id: i64) -> Result<Vec<Ev>, String> {
 
 #[tauri::command]
 fn clis() -> Vec<Cli> {
-    ["claude", "codex", "grok"]
-        .into_iter()
+    AGENTS
+        .iter()
+        .copied()
         .map(|name| Cli {
             name,
             path: which(name).map(|p| p.display().to_string()),
@@ -203,20 +320,26 @@ fn stop(runs: State<Runs>, task_id: i64) {
     }
 }
 
+#[cfg(windows)]
 fn kill_tree(pid: u32) {
     let mut c = Command::new("taskkill");
     c.args(["/T", "/F", "/PID", &pid.to_string()]).stdout(Stdio::null()).stderr(Stdio::null());
-    #[cfg(windows)]
     c.creation_flags(NO_WINDOW);
     let _ = c.status();
 }
 
-/// Windows toast for a finished run; the in-app bell reads the same "verdict"/"end" events.
+/// Agents start in their own process group (see start), so this ends the agent and everything it spawned.
+#[cfg(not(windows))]
+fn kill_tree(pid: u32) {
+    let _ = Command::new("kill").args(["-TERM", &format!("-{pid}")]).stderr(Stdio::null()).status();
+}
+
+/// System notification with the default sound for a finished run; the in-app bell reads the same "verdict"/"end" events.
 fn notify(app: &AppHandle, task_id: i64, agent: &str, body: &str) {
     let title: String = app.state::<Db>().0.lock().unwrap()
         .query_row("SELECT title FROM tasks WHERE id=?1", [task_id], |r| r.get(0)).unwrap_or_default();
     let who = agent[..1].to_uppercase() + &agent[1..];
-    let _ = app.notification().builder().title(format!("{who} Agent · {title}")).body(body).show();
+    let _ = app.notification().builder().title(format!("{who} Agent · {title}")).body(body).sound("Default").show();
 }
 
 fn push(app: &AppHandle, task_id: i64, kind: &str, text: &str) {
@@ -235,16 +358,19 @@ fn start(app: &AppHandle, task_id: i64, agent: &str, model: &str, effort: &str, 
         return Err("Already running.".into());
     }
     let exe = which(agent).ok_or(format!("{agent} is not on PATH"))?;
-    let dir = work_root().join(task_id.to_string());
+    let cwd: Option<String> = app.state::<Db>().0.lock().unwrap().query_row("SELECT cwd FROM tasks WHERE id=?1", [task_id], |r| r.get(0)).map_err(e)?;
+    let dir = cwd.map(PathBuf::from).unwrap_or_else(|| work_root().join(task_id.to_string()));
     fs::create_dir_all(&dir).map_err(e)?;
-    // Rust refuses newlines in .cmd/.bat args; exe shims take them fine.
-    let is_exe = exe.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe"));
+    // Rust refuses newlines in .cmd/.bat args; exe shims (and anything on macOS) take them fine.
+    let is_exe = !cfg!(windows) || exe.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe"));
     let arg = if is_exe { text.clone() } else { text.replace(['\r', '\n'], " ") };
 
     let mut cmd = Command::new(&exe);
     cmd.current_dir(&dir).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).env_remove("CLAUDECODE");
     #[cfg(windows)]
     cmd.creation_flags(NO_WINDOW);
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     match agent {
         "claude" => {
             if let Some(s) = &sid { cmd.args(["-r", s]); }
@@ -265,6 +391,19 @@ fn start(app: &AppHandle, task_id: i64, agent: &str, model: &str, effort: &str, 
             cmd.arg("--no-auto-update");
             if let Some(s) = &sid { cmd.args(["-r", s]); }
             cmd.arg("-p").arg(&arg).args(["--output-format", "streaming-json"]);
+        }
+        "hermes" => {
+            // Nous Research's Hermes Agent: one query, quiet output, no approval prompts nobody could answer.
+            cmd.arg("chat");
+            if let Some(s) = &sid { cmd.args(["-r", s]); }
+            cmd.args(["-Q", "--yolo"]);
+            if !model.is_empty() { cmd.args(["-m", model]); }
+            cmd.arg("-q").arg(&arg);
+        }
+        "gemini" => {
+            if let Some(s) = &sid { cmd.args(["--resume", s]); }
+            cmd.arg("-p").arg(&arg).args(["--yolo", "--output-format", "stream-json"]);
+            if !model.is_empty() { cmd.args(["-m", model]); }
         }
         _ => return Err(format!("Unknown agent {agent}")),
     }
@@ -357,19 +496,39 @@ fn status_in(text: &str) -> Option<&'static str> {
 
 /// Turns one output line from any of the CLIs into thread events.
 #[derive(Default)]
-struct Sink { is_err: bool, live: String, prev: String, sid: Option<String> }
+struct Sink { is_err: bool, live: String, prev: String, sid: Option<String>, last: String }
 
 impl Sink {
+    /// Streamed text so far as one finished message.
+    fn flush(&mut self) -> Vec<(&'static str, String)> {
+        let t = std::mem::take(&mut self.live);
+        if t.trim().is_empty() { vec![] } else { vec![("text", t.trim().to_string())] }
+    }
+
     fn line(&mut self, l: &str) -> Vec<(&'static str, String)> {
+        let mut out = self.parse(l);
+        // Claude sends its final answer as a message and again as the result; show it once.
+        out.retain(|(k, t)| !(*k == "result" && t.trim() == self.last.trim()));
+        if let Some((_, t)) = out.iter().rev().find(|(k, _)| matches!(*k, "text" | "result")) {
+            self.last = t.clone();
+        }
+        out
+    }
+
+    fn parse(&mut self, l: &str) -> Vec<(&'static str, String)> {
         if l.trim().is_empty() {
             return vec![];
         }
         if let Ok(v @ Value::Object(_)) = serde_json::from_str::<Value>(l) {
-            return self.json(&v, l);
+            return self.json(&v);
         }
         let prev = std::mem::replace(&mut self.prev, l.trim().to_string());
-        if let Some(s) = l.trim().strip_prefix("session id:") {
-            self.sid = Some(s.trim().to_string());
+        // codex prints "session id: …", hermes "Session: …" or "session_id: …"
+        let t = l.trim();
+        if let Some(n) = ["session id:", "session_id:", "session:"].iter().find(|p| t.to_ascii_lowercase().starts_with(*p)).map(|p| p.len()) {
+            if let Some(id) = t[n..].split_whitespace().next() {
+                self.sid = Some(id.to_string());
+            }
         }
         if prev == "tokens used" {
             return vec![("cost", format!("{} tokens", l.trim()))];
@@ -380,7 +539,7 @@ impl Sink {
         vec![(if self.is_err { "log" } else { "text" }, l.to_string())]
     }
 
-    fn json(&mut self, v: &Value, raw: &str) -> Vec<(&'static str, String)> {
+    fn json(&mut self, v: &Value) -> Vec<(&'static str, String)> {
         let s = |p: &str| v.pointer(p).and_then(Value::as_str);
         if let Some(id) = ["/session_id", "/sessionId", "/thread_id"].iter().find_map(|p| s(p)) {
             self.sid = Some(id.to_string());
@@ -407,13 +566,46 @@ impl Sink {
                 }).collect()
             }
             "result" => {
-                self.live.clear();
-                let text = s("/result").or(s("/subtype")).unwrap_or("Done.").to_string();
-                let cost = v["total_cost_usd"].as_f64().unwrap_or(0.0);
-                let turns = v["num_turns"].as_u64().unwrap_or(0);
-                vec![("result", text), ("cost", format!("${cost:.2} · {turns} turns"))]
+                // Claude repeats its answer here; Gemini only streamed it, so the streamed text is the answer.
+                let live = std::mem::take(&mut self.live);
+                let mut out = vec![match s("/result") {
+                    Some(t) => ("result", t.to_string()),
+                    None if !live.trim().is_empty() => ("text", live.trim().to_string()),
+                    None => ("result", s("/subtype").or(s("/status")).unwrap_or("Done.").to_string()),
+                }];
+                if let Some(cost) = v["total_cost_usd"].as_f64() {
+                    out.push(("cost", format!("${cost:.2} · {} turns", v["num_turns"].as_u64().unwrap_or(0))));
+                } else if let Some(t) = v.pointer("/stats/total_tokens").and_then(Value::as_u64) {
+                    out.push(("cost", format!("{t} tokens")));
+                }
+                out
             }
-            "system" | "user" => vec![],
+            // Gemini's stream-json echoes the user's message too; only the assistant's is shown.
+            "message" => match (s("/role"), s("/content")) {
+                (Some("assistant"), Some(t)) => {
+                    self.live.push_str(t);
+                    vec![("delta", t.to_string())]
+                }
+                _ => vec![],
+            },
+            // Gemini's tool_use and Grok's tool_call; whatever was said before the call becomes its own message.
+            "tool_use" | "tool_call" => {
+                let i = v.get("parameters").or(v.get("rawInput")).cloned().unwrap_or_default();
+                let arg = i.as_object().and_then(|o| o.values().find_map(Value::as_str)).unwrap_or("");
+                let name = s("/tool_name").or(s("/toolName")).unwrap_or("tool");
+                let mut out = self.flush();
+                out.push(("tool", format!("{name} {}", arg.chars().take(160).collect::<String>()).trim().to_string()));
+                out
+            }
+            // Grok's streaming-json: answer text arrives as {"type":"text","data":"…"}; its reasoning isn't shown.
+            "text" => match s("/data") {
+                Some(t) => {
+                    self.live.push_str(t);
+                    vec![("delta", t.to_string())]
+                }
+                None => vec![],
+            },
+            "system" | "user" | "init" | "tool_result" | "thought" | "tool_call_update" | "available_commands" | "usage" => vec![],
             _ => {
                 if let Some(r) = s("/result") {
                     self.live.clear();
@@ -423,13 +615,13 @@ impl Sink {
                     self.live.push_str(t);
                     return vec![("delta", t.to_string())];
                 }
-                vec![("log", raw.chars().take(200).collect())]
+                // Bookkeeping events CLIs add over time (rate_limit_event, …) carry no text for the user.
+                vec![]
             }
         }
     }
 }
 
-/// PATH lookup preferring a real .exe anywhere on PATH over shims.
 // Self-update for the portable exe: download the release asset, check it against the SHA-256
 // GitHub publishes for it, swap it in for the running exe (Windows allows renaming a running exe)
 // and restart. The frontend finds the release; this side only trusts this repo's download URLs.
@@ -442,14 +634,17 @@ fn is_release_url(url: &str) -> bool {
 #[tauri::command]
 async fn install_update(app: AppHandle, url: String, sha256: String) -> Result<(), String> {
     use sha2::{Digest, Sha256};
+    if !cfg!(windows) { return Err("In-app updates are for the Windows exe. Download the new version from GitHub Releases.".into()) }
     if !is_release_url(&url) { return Err("Not an Orlo release download".into()) }
     let exe = std::env::current_exe().map_err(e)?;
     let new = exe.with_extension("new");
     let old = exe.with_extension("old");
     // curl.exe ships with Windows 10+, so no HTTP client is bundled for one download.
-    let out = Command::new("curl.exe")
-        .args(["-fsSL", "--proto", "=https", "--proto-redir", "=https", "-o"]).arg(&new).arg(&url)
-        .creation_flags(NO_WINDOW).output().map_err(e)?;
+    let mut curl = Command::new("curl.exe");
+    curl.args(["-fsSL", "--proto", "=https", "--proto-redir", "=https", "-o"]).arg(&new).arg(&url);
+    #[cfg(windows)]
+    curl.creation_flags(NO_WINDOW);
+    let out = curl.output().map_err(e)?;
     if !out.status.success() { return Err(format!("Download failed: {}", String::from_utf8_lossy(&out.stderr).trim())) }
     let got = format!("{:x}", Sha256::digest(fs::read(&new).map_err(e)?));
     if !got.eq_ignore_ascii_case(sha256.trim_start_matches("sha256:")) {
@@ -467,10 +662,15 @@ async fn install_update(app: AppHandle, url: String, sha256: String) -> Result<(
     Ok(())
 }
 
+/// PATH lookup; on Windows a real .exe anywhere on PATH wins over shims.
 fn which(name: &str) -> Option<PathBuf> {
     let dirs: Vec<PathBuf> = std::env::split_paths(&std::env::var_os("PATH")?).collect();
     let pathext = std::env::var("PATHEXT").unwrap_or(".COM;.EXE;.BAT;.CMD".into());
-    let exts = std::iter::once(".exe").chain(pathext.split(';').filter(|x| !x.is_empty() && !x.eq_ignore_ascii_case(".exe")));
+    let exts: Vec<&str> = if cfg!(windows) {
+        std::iter::once(".exe").chain(pathext.split(';').filter(|x| !x.is_empty() && !x.eq_ignore_ascii_case(".exe"))).collect()
+    } else {
+        vec![""]
+    };
     for ext in exts {
         for d in &dirs {
             let p = d.join(format!("{name}{ext}"));
@@ -479,7 +679,7 @@ fn which(name: &str) -> Option<PathBuf> {
             }
             // npm's claude.cmd just forwards to this exe; spawning it directly keeps newlines intact
             let sib = d.join(r"node_modules\@anthropic-ai\claude-code\bin\claude.exe");
-            if name == "claude" && ext != ".exe" && sib.is_file() {
+            if cfg!(windows) && name == "claude" && ext != ".exe" && sib.is_file() {
                 return Some(sib);
             }
             return Some(p);
@@ -488,16 +688,51 @@ fn which(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// Apps opened from Finder get launchd's bare PATH, so CLIs in ~/.local/bin or Homebrew would look missing.
+/// Use the PATH the user's login shell builds, the same one a terminal gets.
+#[cfg(target_os = "macos")]
+fn shell_path() {
+    let sh = std::env::var("SHELL").unwrap_or("/bin/zsh".into());
+    let mut dirs: Vec<PathBuf> = Command::new(sh)
+        .args(["-ilc", r#"printf '\n__ORLO_PATH__%s' "$PATH""#])
+        .stdin(Stdio::null()).stderr(Stdio::null()).output().ok()
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).rsplit_once("__ORLO_PATH__").map(|(_, p)| p.trim().to_string()))
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    dirs.extend([home.join(".local/bin"), "/opt/homebrew/bin".into(), "/usr/local/bin".into()]);
+    dirs.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+    let mut seen = std::collections::HashSet::new();
+    dirs.retain(|d| seen.insert(d.clone()));
+    if let Ok(p) = std::env::join_paths(dirs) { std::env::set_var("PATH", p) }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if let Some(code) = cli::main() {
+        std::process::exit(code);
+    }
+    #[cfg(target_os = "macos")]
+    shell_path();
     tauri::Builder::default()
+        // Registered first: launching Orlo again just brings the open window forward.
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(Runs::default())
         .setup(|app| {
             // ORLO_DATA keeps a dev or demo database apart from the real one.
             let dir = match std::env::var_os("ORLO_DATA") { Some(d) => PathBuf::from(d), None => app.path().app_data_dir()? };
             fs::create_dir_all(&dir)?;
             let c = Connection::open(dir.join("orlo.db"))?;
+            // `orlo done` from a terminal may hold the file for a moment.
+            c.busy_timeout(Duration::from_secs(5))?;
             c.execute_batch(SCHEMA)?;
             // Columns added after v1; the error on an already-migrated db is expected.
             let _ = c.execute("ALTER TABLE tasks ADD COLUMN tags TEXT NOT NULL DEFAULT ''", []);
@@ -505,13 +740,14 @@ pub fn run() {
             let _ = c.execute("ALTER TABLE tasks ADD COLUMN model TEXT NOT NULL DEFAULT ''", []);
             let _ = c.execute("ALTER TABLE tasks ADD COLUMN effort TEXT NOT NULL DEFAULT ''", []);
             let _ = c.execute("ALTER TABLE tasks ADD COLUMN verdict TEXT NOT NULL DEFAULT ''", []);
+            let _ = c.execute("ALTER TABLE tasks ADD COLUMN cwd TEXT", []);
             app.manage(Db(Mutex::new(c)));
             // Left behind by install_update; the previous process may still hold it, then it goes next time.
             if let Ok(exe) = std::env::current_exe() { let _ = fs::remove_file(exe.with_extension("old")); }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            lists, add_list, rename_list, delete_list, tasks, add_task, save_task, delete_task, events, clis, running, delegate, reply, stop, install_update
+            lists, add_list, rename_list, delete_list, tag_colors, set_tag_color, rename_tag, cli_path, list_dir, read_text, write_text, tasks, add_task, save_task, delete_task, events, clis, running, delegate, reply, stop, install_update
         ])
         .build(tauri::generate_context!())
         .expect("error while building orlo")
@@ -563,6 +799,8 @@ mod tests {
             s.line(r#"{"type":"result","result":"Done","total_cost_usd":0.0812,"num_turns":3}"#),
             vec![("result", "Done".into()), ("cost", "$0.08 · 3 turns".into())]
         );
+        s.line(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"All done."}]}}"#);
+        assert_eq!(s.line(r#"{"type":"result","result":"All done.","total_cost_usd":0.1,"num_turns":1}"#), vec![("cost", "$0.10 · 1 turns".into())]);
 
         let mut c = Sink { is_err: true, ..Default::default() };
         assert_eq!(c.line("session id: 019a-77"), vec![("log", "session id: 019a-77".into())]);
@@ -571,6 +809,56 @@ mod tests {
         assert_eq!(c.line("1,234"), vec![("cost", "1,234 tokens".into())]);
     }
 
+    #[test]
+    fn keeps_out_of_sign_in_folders() {
+        let home = std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap();
+        let codex = PathBuf::from(&home).join(".codex");
+        if codex.is_dir() { assert!(editable(&codex.to_string_lossy()).is_err()) }
+        assert!(editable(&std::env::temp_dir().to_string_lossy()).is_ok());
+    }
+
+    #[test]
+    fn renames_tags() {
+        assert_eq!(retag("Work,Urgent", "Work", "Job").as_deref(), Some("Job,Urgent"));
+        assert_eq!(retag("Work, Job", "Work", "Job").as_deref(), Some("Job"));
+        assert_eq!(retag("Workshop", "Work", "Job"), None);
+        assert_eq!(retag("", "Work", "Job"), None);
+    }
+
+    #[test]
+    fn parses_gemini_and_hermes_lines() {
+        let mut g = Sink::default();
+        assert!(g.line(r#"{"type":"init","session_id":"g-1","model":"x"}"#).is_empty());
+        assert_eq!(g.sid.take().as_deref(), Some("g-1"));
+        assert!(g.line(r#"{"type":"message","role":"user","content":"do it"}"#).is_empty());
+        assert_eq!(g.line(r#"{"type":"message","role":"assistant","content":"Done. ORLO_STATUS: review","delta":true}"#), vec![("delta", "Done. ORLO_STATUS: review".into())]);
+        assert_eq!(
+            g.line(r#"{"type":"tool_use","tool_name":"run_shell_command","parameters":{"command":"ls"}}"#),
+            vec![("text", "Done. ORLO_STATUS: review".into()), ("tool", "run_shell_command ls".into())]
+        );
+        assert_eq!(g.line(r#"{"type":"message","role":"assistant","content":"All set.","delta":true}"#), vec![("delta", "All set.".into())]);
+        assert_eq!(
+            g.line(r#"{"type":"result","status":"success","stats":{"total_tokens":42}}"#),
+            vec![("text", "All set.".into()), ("cost", "42 tokens".into())]
+        );
+
+        let mut k = Sink::default();
+        assert!(k.line(r#"{"type":"thought","data":" verify the success "}"#).is_empty());
+        assert!(k.line(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#).is_empty());
+        assert_eq!(k.line(r#"{"type":"text","data":"Reading it."}"#), vec![("delta", "Reading it.".into())]);
+        assert_eq!(
+            k.line(r#"{"type":"tool_call","toolCallId":"c-1","status":"pending","toolName":"read_file","rawInput":{"target_file":"a.md"}}"#),
+            vec![("text", "Reading it.".into()), ("tool", "read_file a.md".into())]
+        );
+        assert!(k.line(r#"{"type":"tool_call_update","toolCallId":"c-1","status":null}"#).is_empty());
+        assert!(k.line(r#"{"type":"usage","usage":{"input_tokens":1}}"#).is_empty());
+
+        let mut h = Sink::default();
+        assert_eq!(h.line("Session:        20260225_143052_a1b2c3"), vec![("text", "Session:        20260225_143052_a1b2c3".into())]);
+        assert_eq!(h.sid.as_deref(), Some("20260225_143052_a1b2c3"));
+    }
+
+    #[cfg(windows)]
     #[test]
     fn prefers_exe_over_shim() {
         let tmp = std::env::temp_dir().join("orlo-which");
