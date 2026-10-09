@@ -56,6 +56,10 @@ type Task = {
   id: number; title: string; notes: string; due: string | null; list_id: number | null; status: string
   agent: string | null; session_id: string | null; tags: string; kind: string; model: string; effort: string; verdict: string
   cwd: string | null; access: string
+  /** "claude:<session id>" when an agent added it from its own session */
+  origin: string | null
+  /** A note an agent wrote for task `for_task`; `fresh` until opened, and the task shows READ THIS. */
+  for_task: number | null; fresh: boolean
 }
 type Ev = { task_id: number; kind: string; text: string }
 type Cli = { name: string; path: string | null; cap: string }
@@ -65,7 +69,7 @@ type View = "home" | "tasks" | "notes" | "code" | number | `#${string}`
 type Notif = { id: number; task_id: number | null; title: string; text: string; tone: Tone; at: number; read: boolean }
 type Tone = "work" | "review" | "warn" | "done" | "idle"
 type Ctx = {
-  clis: Cli[]; lists: List[]; tags: string[]; running: number[]; sel: number | null
+  clis: Cli[]; lists: List[]; tags: string[]; running: number[]; sel: number | null; tasks: Task[]
   open: (t: Task) => void; toggle: (t: Task) => void; save: (t: Task) => void
   remove: (t: Task) => void; delegate: (t: Task, p: Pick) => void; fresh: number | null
 }
@@ -131,11 +135,12 @@ function dueLabel(due: string) {
   return new Date(due + "T00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" })
 }
 
-const needsYou = (t: Task, live: boolean) => !!t.agent && t.status !== "done" && !live && (t.verdict === "review" || t.verdict === "input" || !!t.session_id)
+const needsYou = (t: Task, live: boolean) => !!t.agent && t.status === "open" && !live && (t.verdict === "review" || t.verdict === "input" || !!t.session_id)
 
 function agentState(t: Task, live: boolean): { label: string; tone: Tone } {
   if (live) return { label: "Working", tone: "work" }
-  if (t.status === "done") return { label: t.verdict === "complete" ? "Completed" : "Done", tone: "done" }
+  if (t.status === "x") return { label: "X'd", tone: "idle" }
+  if (t.status !== "open") return { label: t.verdict === "complete" ? "Completed" : "Done", tone: "done" }
   if (t.verdict === "input") return { label: "Needs input", tone: "warn" }
   if (t.verdict === "review" || t.session_id) return { label: "Needs review", tone: "review" }
   return { label: "Stopped", tone: "idle" }
@@ -147,15 +152,15 @@ const toneDot: Record<Tone, string> = {
 // Linear-style sections for the list view; also the order j/k walks. Agent work floats to the top.
 function sections(ts: Task[], running: number[]): [string, Task[]][] {
   const t0 = today()
-  const agent = (t: Task) => t.status !== "done" && (running.includes(t.id) || needsYou(t, false))
-  const open = ts.filter((t) => t.status !== "done" && !agent(t))
+  const agent = (t: Task) => t.status === "open" && (running.includes(t.id) || needsYou(t, false))
+  const open = ts.filter((t) => t.status === "open" && !agent(t))
   const out: [string, Task[]][] = [
     ["With agents", ts.filter(agent)],
     ["Overdue", open.filter((t) => t.due != null && t.due < t0)],
     ["Today", open.filter((t) => t.due === t0)],
     ["Upcoming", open.filter((t) => t.due != null && t.due > t0).sort((a, b) => a.due!.localeCompare(b.due!))],
     ["No date", open.filter((t) => t.due == null)],
-    ["Completed", ts.filter((t) => t.status === "done")],
+    ["Completed", ts.filter((t) => t.status !== "open")],
   ]
   return out.filter(([, x]) => x.length)
 }
@@ -239,7 +244,7 @@ export default function App() {
     const check = () => {
       const t0 = today(), t1 = inDays(1)
       const seen = store.get<string[]>("orlo.dueSeen", []).filter((k) => k.startsWith(t0))
-      const open = tasksRef.current.filter((t) => t.kind === "task" && t.status !== "done" && t.due != null && t.due <= t1)
+      const open = tasksRef.current.filter((t) => t.kind === "task" && t.status === "open" && t.due != null && t.due <= t1)
       const buckets: [string, Task[]][] = [
         ["Overdue", open.filter((t) => t.due! < t0)],
         ["Due today", open.filter((t) => t.due === t0)],
@@ -326,8 +331,8 @@ export default function App() {
   }
   const toggle = (t: Task) => {
     if (t.kind !== "task") return
-    if (t.status !== "done") celebrate("first-done", !tasksRef.current.some((x) => x.kind === "task" && x.status === "done"))
-    save({ ...t, status: t.status === "done" ? "open" : "done" })
+    if (t.status === "open") celebrate("first-done", !tasksRef.current.some((x) => x.kind === "task" && x.status !== "open"))
+    save({ ...t, status: t.status !== "open" ? "open" : "done" })
   }
   const delegate = async (t: Task, p: Pick) => {
     celebrate("first-agent", !tasksRef.current.some((x) => x.agent))
@@ -337,6 +342,7 @@ export default function App() {
     refresh()
   }
   const openTask = (t: Task) => {
+    if (t.kind === "note" && t.fresh) call("seen", { id: t.id }).then(refresh)
     if (t.kind === "note" && mode !== "note") go("notes")
     setSel(t.id)
     setOpen(true)
@@ -415,7 +421,7 @@ export default function App() {
     return () => window.removeEventListener("contextmenu", onMenu)
   }, [])
 
-  const ctx: Ctx = { clis, lists, tags: allTags, running, sel, open: openTask, toggle, save, remove, delegate, fresh }
+  const ctx: Ctx = { clis, lists, tags: allTags, running, sel, tasks, open: openTask, toggle, save, remove, delegate, fresh }
   const unread = notifs.filter((n) => !n.read).length
   const showBoard = mode === "task" && layout === "board" && !home && !code
   const composer = <Composer key={mode} kind={mode} clis={clis} tags={allTags} inputRef={newRef} onAdd={addTask} />
@@ -440,7 +446,7 @@ export default function App() {
             <SidebarTrigger />
             <Separator orientation="vertical" className="mx-1 data-vertical:h-4 data-vertical:self-center" />
             <h1 className="pointer-events-none truncate text-sm font-medium">{home ? "Home" : viewName}</h1>
-            {!home && !code && <Badge variant="secondary" className="pointer-events-none tabular-nums">{visible.filter((t) => t.status !== "done").length}</Badge>}
+            {!home && !code && <Badge variant="secondary" className="pointer-events-none tabular-nums">{visible.filter((t) => t.status === "open").length}</Badge>}
             <div className="ml-auto flex items-center gap-1">
               {mode === "task" && !home && !code ? (
                 <ToggleGroup value={[layout]} onValueChange={(v) => v[0] && setLayout(v[0] as Layout)} variant="outline" size="sm" spacing={0}>
@@ -569,7 +575,7 @@ function AppSidebar(p: {
   }
   const t0 = today()
   // The badge counts what wants attention now: due or overdue, or an agent waiting on you.
-  const now = p.tasks.filter((t) => t.kind === "task" && t.status !== "done" && ((t.due != null && t.due <= t0) || needsYou(t, p.running.includes(t.id))))
+  const now = p.tasks.filter((t) => t.kind === "task" && t.status === "open" && ((t.due != null && t.due <= t0) || needsYou(t, p.running.includes(t.id))))
   const nav: [View, string, React.ReactNode, number][] = [
     ["home", "Home", <LayoutDashboard />, 0],
     ["tasks", "Tasks", <ListTodo />, now.length],
@@ -763,7 +769,7 @@ function AgentTasks({ cli, tasks, running, open, children }: {
   cli: Cli; tasks: Task[]; running: number[]; open: (t: Task) => void; children: React.ReactElement
 }) {
   const [show, setShow] = useState(false)
-  const done = tasks.filter((t) => t.status === "done").sort((a, b) => b.id - a.id)
+  const done = tasks.filter((t) => t.status !== "open").sort((a, b) => b.id - a.id)
   const working = tasks.filter((t) => running.includes(t.id)).length
   const waiting = tasks.filter((t) => needsYou(t, running.includes(t.id))).length
   const now = [working && `${working} working`, waiting && `${waiting} waiting on you`].filter(Boolean).join(" · ")
@@ -815,6 +821,21 @@ function Nothing({ searching, mode, onAdd }: { searching: boolean; mode: Mode; o
   )
 }
 
+// An agent left a note for this task that nobody has opened yet; clicking opens it.
+function ReadThis({ t, ctx }: { t: Task; ctx: Ctx }) {
+  const notes = ctx.tasks.filter((n) => n.kind === "note" && n.for_task === t.id && n.fresh)
+  if (!notes.length) return null
+  const last = notes[notes.length - 1]
+  return (
+    <Tip label={`Open note #${last.id}: ${last.title}`}>
+      <button
+        type="button" onClick={(e) => { e.stopPropagation(); ctx.open(last) }}
+        className="inline-flex h-5 shrink-0 items-center gap-1 rounded-full bg-amber-400/15 px-2 text-[11px] font-semibold tracking-wide text-amber-400 ring-1 ring-amber-400/30 hover:bg-amber-400/25"
+      ><FileText className="size-3" />READ THIS{notes.length > 1 && ` · ${notes.length}`}</button>
+    </Tip>
+  )
+}
+
 function TagBadge({ tag, onRemove }: { tag: string; onRemove?: () => void }) {
   return (
     <Badge variant="outline" className="gap-1.5 font-normal">
@@ -837,7 +858,7 @@ function AgentBadge({ t, live, row }: { t: Task; live: boolean; row?: boolean })
 
 function DueText({ t }: { t: Task }) {
   if (!t.due || t.kind !== "task") return null
-  const done = t.status === "done"
+  const done = t.status !== "open"
   const overdue = !done && t.due < today()
   return (
     <span className={cn("inline-flex shrink-0 items-center gap-1 text-xs tabular-nums", overdue ? "text-destructive" : "text-muted-foreground")}>
@@ -855,7 +876,7 @@ function Choice({ value, options, onChange, icon, className }: {
       <SelectTrigger size="sm" className={cn("gap-1.5 border-transparent shadow-none hover:bg-muted dark:bg-transparent dark:hover:bg-muted", className)}>
         {icon}<SelectValue />
       </SelectTrigger>
-      <SelectContent alignItemWithTrigger={false} className="min-w-44">
+      <SelectContent alignItemWithTrigger={false} className="w-auto min-w-44 max-w-80">
         {options.map(([v, l, off]) => <SelectItem key={v} value={v} disabled={off}>{l}</SelectItem>)}
       </SelectContent>
     </Select>
@@ -864,26 +885,30 @@ function Choice({ value, options, onChange, icon, className }: {
 
 // CLI, model, reasoning and access for a run; each list only offers what that CLI supports.
 // `compact`: small pills for the Code view's chat box, with icons standing in for the words.
-function AgentPick({ clis, v, set, required, compact }: { clis: Cli[]; v: Pick; set: (p: Pick) => void; required?: boolean; compact?: boolean }) {
+// `rows`: one labeled row per setting, for the task panel.
+function AgentPick({ clis, v, set, required, compact, rows }: { clis: Cli[]; v: Pick; set: (p: Pick) => void; required?: boolean; compact?: boolean; rows?: boolean }) {
   const models = MODELS[v.agent] ?? []
   const access = ACCESS[v.agent] ?? []
   const agents = clis.map((c): [string, React.ReactNode, boolean] => [c.name, <><AgentIcon name={c.name} />{title(c.name)}{required ? "" : " Agent"}</>, !c.path])
   const pill = compact ? "h-6 gap-1 rounded-md px-1.5 text-xs text-muted-foreground hover:text-foreground [&_svg]:size-3.5" : undefined
+  const row = (icon: React.ReactNode, label: string, el: React.ReactNode) => rows ? <Prop icon={icon} label={label}>{el}</Prop> : el
+  // Rows have their own labels, so the choices drop the "model" / "reasoning" words.
+  const short = compact || rows
   return (
     <>
-      <Choice
-        value={v.agent || "none"} icon={v.agent ? undefined : <Bot />} className={cn(pill, compact && "text-foreground")}
+      {row(<Bot />, "Agent", <Choice
+        value={v.agent || "none"} icon={v.agent || rows ? undefined : <Bot />} className={cn(pill, compact && "text-foreground")}
         onChange={(a) => set(a === "none" ? noPick : { ...noPick, agent: a })}
         options={required ? agents : [["none", "No agent"], ...agents]}
-      />
+      />)}
       {models.length > 0 && <>
-        <Choice value={v.model || "default"} onChange={(m) => set({ ...v, model: m === "default" ? "" : m })} className={pill}
-          options={[["default", compact ? "Default" : "Default model"], ...models.map((m): [string, string] => [m, m])]} />
-        <Choice value={v.effort || "default"} onChange={(x) => set({ ...v, effort: x === "default" ? "" : x })} className={pill}
+        {row(<Sparkles />, "Model", <Choice value={v.model || "default"} onChange={(m) => set({ ...v, model: m === "default" ? "" : m })} className={pill}
+          options={[["default", short ? "Default" : "Default model"], ...models.map((m): [string, string] => [m, m])]} />)}
+        {row(<Brain />, "Reasoning", <Choice value={v.effort || "default"} onChange={(x) => set({ ...v, effort: x === "default" ? "" : x })} className={pill}
           icon={compact ? <Brain /> : undefined}
-          options={[["default", compact ? "Auto" : "Default reasoning"], ...EFFORTS[v.agent].map((x): [string, string] => [x, compact ? title(x) : `${title(x)} reasoning`])]} />
+          options={[["default", short ? "Auto" : "Default reasoning"], ...EFFORTS[v.agent].map((x): [string, string] => [x, short ? title(x) : `${title(x)} reasoning`])]} />)}
       </>}
-      {access.length > 1 && (
+      {access.length > 1 && row(<Shield />, "Access",
         <Choice value={v.access || "default"} onChange={(x) => set({ ...v, access: x === "default" ? "" : x })} className={pill}
           icon={compact ? <Shield /> : undefined}
           options={access.map(([val, label]): [string, string] => [val || "default", label])} />
@@ -1007,7 +1032,7 @@ function TaskMenu({ t, ctx, className, children, ...rest }: {
   t: Task; ctx: Ctx; className?: string; children: React.ReactNode
 } & Omit<React.HTMLAttributes<HTMLDivElement>, "children">) {
   const isTask = t.kind === "task"
-  const done = t.status === "done"
+  const done = t.status !== "open"
   const canDelegate = isTask && !t.session_id && !ctx.running.includes(t.id) && !done
   const has = tagList(t.tags)
   return (
@@ -1018,6 +1043,7 @@ function TaskMenu({ t, ctx, className, children, ...rest }: {
       <ContextMenuContent className="w-52">
         <ContextMenuItem onClick={() => ctx.open(t)}>Open<ContextMenuShortcut>Enter</ContextMenuShortcut></ContextMenuItem>
         {isTask && <ContextMenuItem onClick={() => ctx.toggle(t)}>{done ? "Reopen" : "Complete"}<ContextMenuShortcut>Space</ContextMenuShortcut></ContextMenuItem>}
+        {isTask && !done && <ContextMenuItem onClick={() => ctx.save({ ...t, status: "x" })}><X />X it<ContextMenuShortcut>won't do</ContextMenuShortcut></ContextMenuItem>}
         <ContextMenuSeparator />
         {isTask && (
           <ContextMenuSub>
@@ -1069,16 +1095,23 @@ function TaskMenu({ t, ctx, className, children, ...rest }: {
 }
 
 function Done({ t, ctx, className }: { t: Task; ctx: Ctx; className?: string }) {
+  if (t.status === "x") return (
+    <button
+      type="button" aria-label="Reopen" title="X'd: closed without doing it. Click to reopen."
+      onClick={(e) => { e.stopPropagation(); ctx.save({ ...t, status: "open" }) }}
+      className={cn("grid size-[18px] shrink-0 place-items-center rounded-full bg-muted-foreground/70 text-background", className)}
+    ><X className="size-3" strokeWidth={3} /></button>
+  )
   return (
     <Checkbox
-      checked={t.status === "done"} onCheckedChange={() => ctx.toggle(t)} onClick={(e) => e.stopPropagation()}
-      aria-label={t.status === "done" ? "Reopen" : "Complete"} className={cn("size-[18px] rounded-full", className)}
+      checked={t.status !== "open"} onCheckedChange={() => ctx.toggle(t)} onClick={(e) => e.stopPropagation()}
+      aria-label={t.status !== "open" ? "Reopen" : "Complete"} className={cn("size-[18px] rounded-full", className)}
     />
   )
 }
 
 function Row({ t, ctx, listName, compact }: { t: Task; ctx: Ctx; listName?: string; compact?: boolean }) {
-  const done = t.status === "done"
+  const done = t.status !== "open"
   const live = ctx.running.includes(t.id)
   const tags = tagList(t.tags)
   return (
@@ -1091,6 +1124,7 @@ function Row({ t, ctx, listName, compact }: { t: Task; ctx: Ctx; listName?: stri
       <Id t={t} className="w-7" />
       <span className={cn("-ml-1 min-w-24 flex-1 truncate", done && "text-muted-foreground line-through")}>{t.title}</span>
       <span className="flex shrink-0 items-center gap-1.5">
+        <ReadThis t={t} ctx={ctx} />
         <span className="hidden items-center gap-1.5 @xl/row:flex">
           {tags.slice(0, 2).map((g) => <TagBadge key={g} tag={g} />)}
           {tags.length > 2 && <Badge variant="outline" className="font-normal text-muted-foreground">+{tags.length - 2}</Badge>}
@@ -1116,7 +1150,7 @@ function Id({ t, className }: { t: Task; className?: string }) {
 }
 
 function TaskCard({ t, ctx }: { t: Task; ctx: Ctx }) {
-  const done = t.status === "done"
+  const done = t.status !== "open"
   return (
     <TaskMenu
       t={t} ctx={ctx} draggable onDragStart={(e) => e.dataTransfer.setData("text/plain", String(t.id))}
@@ -1163,11 +1197,11 @@ function NoteCard({ t, ctx }: { t: Task; ctx: Ctx }) {
 
 function Board({ tasks, ctx }: { tasks: Task[]; ctx: Ctx }) {
   const [over, setOver] = useState<string | null>(null)
-  const withAgent = (t: Task) => t.status !== "done" && !!t.agent && (ctx.running.includes(t.id) || needsYou(t, false))
+  const withAgent = (t: Task) => t.status === "open" && !!t.agent && (ctx.running.includes(t.id) || needsYou(t, false))
   const cols: { id: string; name: string; dot: string; items: Task[]; status?: string }[] = [
-    { id: "todo", name: "To do", dot: "bg-muted-foreground", items: tasks.filter((t) => t.status !== "done" && !withAgent(t)), status: "open" },
+    { id: "todo", name: "To do", dot: "bg-muted-foreground", items: tasks.filter((t) => t.status === "open" && !withAgent(t)), status: "open" },
     { id: "agents", name: "With agents", dot: "bg-sky-400", items: tasks.filter(withAgent) },
-    { id: "done", name: "Done", dot: "bg-emerald-400", items: tasks.filter((t) => t.status === "done"), status: "done" },
+    { id: "done", name: "Done", dot: "bg-emerald-400", items: tasks.filter((t) => t.status !== "open"), status: "done" },
   ]
   return (
     <div className="grid min-w-[600px] grid-cols-3 gap-3 px-6 pb-8">
@@ -1202,14 +1236,14 @@ function greeting() {
 
 function Home({ tasks, ctx, go, setLayout, composer }: { tasks: Task[]; ctx: Ctx; go: (v: View) => void; setLayout: (l: Layout) => void; composer: React.ReactNode }) {
   const t0 = today()
-  const open = tasks.filter((t) => t.kind === "task" && t.status !== "done")
+  const open = tasks.filter((t) => t.kind === "task" && t.status === "open")
   const overdue = open.filter((t) => t.due != null && t.due < t0)
   const dueToday = open.filter((t) => t.due === t0)
   const review = tasks.filter((t) => needsYou(t, ctx.running.includes(t.id)))
   const agentTasks = tasks.filter((t) => t.agent).sort((a, b) => Number(ctx.running.includes(b.id)) - Number(ctx.running.includes(a.id)) || b.id - a.id).slice(0, 5)
   const upNext = [...overdue, ...dueToday, ...open.filter((t) => t.due == null)].slice(0, 6)
   const notes = tasks.filter((t) => t.kind === "note").slice(-3).reverse()
-  const done = tasks.filter((t) => t.kind === "task" && t.status === "done").length
+  const done = tasks.filter((t) => t.kind === "task" && t.status !== "open").length
   const pct = done + open.length ? Math.round((done / (done + open.length)) * 100) : 0
   const board = () => { setLayout("board"); go("tasks") }
 
@@ -1472,9 +1506,9 @@ function Palette({ open, setOpen, tasks, lists, tags, layout, run }: {
             <CommandGroup heading="Tasks & notes">
               {tasks.slice().reverse().map((t) => (
                 <CommandItem key={t.id} value={`${t.title} ${t.tags} #${t.id}`} onSelect={act(() => run.open(t))}>
-                  {t.kind === "note" ? <FileText /> : <CircleCheck className={cn(t.status === "done" && "text-emerald-400")} />}
+                  {t.kind === "note" ? <FileText /> : <CircleCheck className={cn(t.status !== "open" && "text-emerald-400")} />}
                   <span className="truncate">{t.title}</span>
-                  <CommandShortcut>{t.kind === "note" ? "Note" : t.status === "done" ? "Done" : "Task"}</CommandShortcut>
+                  <CommandShortcut>{t.kind === "note" ? "Note" : t.status === "x" ? "X'd" : t.status !== "open" ? "Done" : "Task"}</CommandShortcut>
                 </CommandItem>
               ))}
             </CommandGroup>
@@ -1530,10 +1564,19 @@ function Detail({ task, ctx, thread, live, isRunning, where, close, reply, stop 
   useEffect(() => { end.current?.scrollIntoView({ block: "end" }) }, [thread.length, live])
   const isTask = task.kind === "task"
   const cli = ctx.clis.find((c) => c.name === task.agent)
-  const done = task.status === "done"
+  const done = task.status !== "open"
   const own = tagList(task.tags)
   const save = ctx.save
   const state = agentState(task, isRunning)
+  // Sessions this agent could pick up: the one that filed the task, then ones Orlo ran for other tasks.
+  const from = pick.agent && task.origin?.startsWith(pick.agent + ":") ? task.origin.slice(pick.agent.length + 1) : ""
+  const sessions: [string, string][] = !pick.agent ? [] : [
+    ...(from ? [[from, `The session that added this (${from.slice(0, 8)})`] as [string, string]] : []),
+    ...ctx.tasks.filter((x) => x.agent === pick.agent && x.session_id && x.session_id !== from && x.id !== task.id)
+      .slice(-8).reverse().map((x): [string, string] => [x.session_id!, `#${x.id} ${x.title}`]),
+  ]
+  // A session picked for one agent means nothing to another.
+  const session = sessions.some(([v]) => v === pick.session) ? pick.session! : ""
   const send = () => { if (answer.trim()) { reply(answer.trim()); setAnswer("") } }
 
   return (
@@ -1572,7 +1615,7 @@ function Detail({ task, ctx, thread, live, isRunning, where, close, reply, stop 
             {isTask && (
               <Prop icon={<CircleCheck />} label="Status">
                 <Button variant="ghost" size="sm" className="font-normal" onClick={() => ctx.toggle(task)}>
-                  <span className={cn("size-2 rounded-full", done ? "bg-emerald-400" : "bg-muted-foreground")} />{done ? "Done" : "To do"}
+                  <span className={cn("size-2 rounded-full", task.status === "x" ? "bg-muted-foreground/40" : done ? "bg-emerald-400" : "bg-muted-foreground")} />{task.status === "x" ? "X'd" : done ? "Done" : "To do"}
                 </Button>
               </Prop>
             )}
@@ -1583,13 +1626,14 @@ function Detail({ task, ctx, thread, live, isRunning, where, close, reply, stop 
             </Prop>
             {task.cwd && <Prop icon={<FolderOpen />} label="Folder"><span className="truncate px-2 font-mono text-xs text-muted-foreground" title={task.cwd}>{task.cwd}</span></Prop>}
             <Prop icon={<Tag />} label="Tags">
+              <ReadThis t={task} ctx={ctx} />
               {own.map((g) => <TagBadge key={g} tag={g} onRemove={() => save(withTag(task, g))} />)}
               <TagPicker
                 has={own} known={ctx.tags} toggle={(g) => save(withTag(task, g))}
                 trigger={<Button variant="ghost" size="sm" className="font-normal text-muted-foreground" />}
               ><Plus />Add tag</TagPicker>
             </Prop>
-            {isTask && (
+            {isTask && (task.agent || done) && (
               <Prop icon={<Bot />} label="Agent">
                 {task.agent ? (
                   <div className="flex flex-col gap-1 py-1.5">
@@ -1598,14 +1642,27 @@ function Detail({ task, ctx, thread, live, isRunning, where, close, reply, stop 
                       {[task.model || "default model", task.effort && `${task.effort} reasoning`, cli && `cap ${cli.cap}`].filter(Boolean).join(" · ")}
                     </span>
                   </div>
-                ) : !done ? (
-                  <>
-                    <AgentPick clis={ctx.clis} v={pick} set={setPick} />
-                    {pick.agent && <Button size="sm" className="mt-1" onClick={() => ctx.delegate(task, pick)}><Sparkles />Start {title(pick.agent)} Agent</Button>}
-                  </>
                 ) : <span className="text-muted-foreground">—</span>}
               </Prop>
             )}
+            {isTask && !task.agent && !done && <>
+              <AgentPick clis={ctx.clis} v={pick} set={setPick} rows />
+              {pick.agent && (
+                <Prop icon={<MessageSquareText />} label="Session">
+                  <Choice
+                    value={session || "new"} onChange={(v) => setPick({ ...pick, session: v === "new" ? "" : v })}
+                    options={[["new", "New session"], ...sessions]} className="max-w-full"
+                  />
+                </Prop>
+              )}
+              {pick.agent && (
+                <div className="pt-1 pl-26">
+                  <Button size="sm" onClick={() => ctx.delegate(task, { ...pick, session })}>
+                    <Sparkles />{session ? "Continue in" : "Start"} {title(pick.agent)} Agent
+                  </Button>
+                </div>
+              )}
+            </>}
           </div>
 
           <Separator />

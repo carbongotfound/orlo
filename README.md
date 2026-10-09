@@ -22,7 +22,8 @@ Write a task, hand it to Claude Code, Codex, Grok, Hermes or Gemini, then review
 
 - **Tasks:** one list with Overdue, Today, Upcoming and No date sections. Tasks you've handed to an agent sit at the top. Add lists, `#tags` and due dates, then switch between list and board. Rename a tag or pick its color from the tag's menu in the sidebar.
 - **Dates as you type:** end a new task with `today`, `tomorrow`, `friday`, `next week` or `in 3 days` and it gets that due date.
-- **Delegate to agents:** send a task to the `claude`, `codex`, `grok`, `hermes` or `gemini` CLI you already use. The agent works in its own folder, streams its progress into the task, and ends by reporting one of three outcomes: done, needs review or needs input.
+- **Delegate to agents:** send a task to the `claude`, `codex`, `grok`, `hermes` or `gemini` CLI you already use. The agent works in its own folder, streams its progress into the task, and ends by reporting one of three outcomes: done, needs review or needs input. Start a new session, or continue one: the Claude Code session that added the task with `orlo add` (Orlo forks it, so a session still open in your terminal is left alone) or one Orlo ran for another task.
+- **X a task:** close it without doing it (won't do, obsolete). Right-click **X it**, or `orlo x <id>` from any agent.
 - **Review loop:** reply to ask for changes, which resumes the same session. Approve to check the task off. Stop kills the run.
 - **Markdown notes:**
   - Formatting appears as you type: `#` gives a heading, `-` a list, `- [ ]` a checklist and `>` a quote.
@@ -145,8 +146,11 @@ orlo notes            # notes
 orlo show 12          # one task or note in full
 orlo add "Fix the login timeout" --notes "Happens on Safari only" --due 2026-10-12 --tag Work
 orlo add "Standup ideas" --note --notes "..."
+orlo add "Add dark mode" --list "Orlo Features" --tag "Orlo Features"
+orlo add "API findings" --note --notes "..." --for 12   # task 12 shows READ THIS until you open the note
 orlo append 12 "Done: rewrote the retry loop, tests pass."
 orlo done 12          # check it off (Orlo picks this up when you switch back to it)
+orlo x 12             # X it: closed without doing it (won't do, obsolete)
 orlo reopen 12
 orlo tasks --json     # tasks, notes and show also take --json
 ```
