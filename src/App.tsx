@@ -1087,7 +1087,8 @@ function Row({ t, ctx, listName, compact }: { t: Task; ctx: Ctx; listName?: stri
         compact ? "rounded-md border-0 px-2" : "px-6", ctx.fresh === t.id && "orlo-new")}
     >
       <Done t={t} ctx={ctx} />
-      <span className={cn("min-w-24 flex-1 truncate", done && "text-muted-foreground line-through")}>{t.title}</span>
+      <Id t={t} className="w-7" />
+      <span className={cn("-ml-1 min-w-24 flex-1 truncate", done && "text-muted-foreground line-through")}>{t.title}</span>
       <span className="flex shrink-0 items-center gap-1.5">
         <span className="hidden items-center gap-1.5 @xl/row:flex">
           {tags.slice(0, 2).map((g) => <TagBadge key={g} tag={g} />)}
@@ -1108,6 +1109,11 @@ function Row({ t, ctx, listName, compact }: { t: Task; ctx: Ctx; listName?: stri
   )
 }
 
+// The number you and your agents use to point at a task or note ("look at #21", `orlo show 21`).
+function Id({ t, className }: { t: Task; className?: string }) {
+  return <span className={cn("shrink-0 font-mono text-[11px] text-muted-foreground/70 tabular-nums", className)}>#{t.id}</span>
+}
+
 function TaskCard({ t, ctx }: { t: Task; ctx: Ctx }) {
   const done = t.status === "done"
   return (
@@ -1119,6 +1125,7 @@ function TaskCard({ t, ctx }: { t: Task; ctx: Ctx }) {
         <CardHeader className="flex items-start gap-2.5">
           <Done t={t} ctx={ctx} className="mt-px" />
           <CardTitle className={cn("text-sm font-normal", done && "text-muted-foreground line-through")}>{t.title}</CardTitle>
+          <Id t={t} className="ml-auto mt-0.5" />
         </CardHeader>
         {(t.notes || t.tags || t.agent || t.due) && (
           <CardContent className="flex flex-col gap-2 pl-[38px]">
@@ -1144,7 +1151,7 @@ function NoteCard({ t, ctx }: { t: Task; ctx: Ctx }) {
       <Card className="h-44 overflow-hidden transition-shadow hover:ring-foreground/20">
         {src && <img src={src} alt="" className="-mt-4 h-20 w-full shrink-0 object-cover" draggable={false} />}
         <CardHeader>
-          <CardTitle className="truncate">{t.title}</CardTitle>
+          <CardTitle className="flex items-baseline gap-2"><span className="truncate">{t.title}</span><Id t={t} className="ml-auto" /></CardTitle>
           <CardDescription className={cn("whitespace-pre-wrap", src ? "line-clamp-1" : "line-clamp-4")}>{plain(t.notes) || "Empty note"}</CardDescription>
         </CardHeader>
         {t.tags && <CardContent className="mt-auto flex flex-wrap gap-1">{tagList(t.tags).map((g) => <TagBadge key={g} tag={g} />)}</CardContent>}
@@ -1503,6 +1510,10 @@ function Detail({ task, ctx, thread, live, isRunning, where, close, reply, stop 
         <span className="truncate text-muted-foreground">{where}</span>
         <span className="text-muted-foreground">/</span>
         <span className="truncate">{isTask ? "Task" : "Note"}</span>
+        <Tip label="Copy ID; type it in any agent chat to point at this">
+          <button className="rounded px-1 font-mono text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+            onClick={() => { navigator.clipboard.writeText(`#${task.id}`); toast.success(`Copied #${task.id}`) }}>#{task.id}</button>
+        </Tip>
         <div className="ml-auto flex gap-0.5">
           <Tip label={<>Delete <Kbd>Del</Kbd></>}>
             <Button variant="ghost" size="icon-sm" onClick={() => ctx.remove(task)} aria-label="Delete"><Trash2 /></Button>

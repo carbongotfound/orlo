@@ -130,6 +130,7 @@ Every command prints plain text; add `--json` to `tasks`, `notes` and `show` for
 
 ## How to use it
 
+- When the user mentions `#21` or "task 21", that's an Orlo id: run `show 21` to see what they mean.
 - Before starting, run `tasks` (and `show <id>` for anything relevant) so you work on what the user actually has planned.
 - When you finish a task the user gave you that is also in Orlo, `append` a one-line summary of what you did, then mark it `done`.
 - Only mark tasks done that you actually completed. If you only got part of the way, `append` what's left instead.

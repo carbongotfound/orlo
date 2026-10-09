@@ -1,7 +1,7 @@
 {
   "name": "orlo",
   "private": true,
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Tasks, notes and AI agents in one calm app for Windows and macOS",
   "license": "MIT",
   "packageManager": "pnpm@10.34.6",

@@ -134,6 +134,8 @@ On a Mac, use <kbd>⌘</kbd> where this table says <kbd>Ctrl</kbd>. Orlo shows t
 
 ## Agent CLI
 
+Every task and note has an ID, shown as `#21` next to it (click it in the side panel to copy). Type `#21` in any agent chat and Orlo sends that task's title and description along, so the agent knows what you mean.
+
 The Orlo app is also a command-line tool, so any agent (Claude Code, Codex, a script) can pick up work from your list and file new work:
 
 ```sh

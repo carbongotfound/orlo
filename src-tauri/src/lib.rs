@@ -463,19 +463,23 @@ fn delegate(app: AppHandle, task_id: i64, agent: String, model: String, effort: 
     if !plain(&model) || !plain(&effort) {
         return Err("Model and reasoning may only use letters, digits, '.', '_' and '-'.".into());
     }
-    let (title, notes, sid): (String, String, Option<String>) = {
+    let (title, notes, sid, linked): (String, String, Option<String>, String) = {
         let c = app.state::<Db>();
         let c = c.0.lock().unwrap();
-        c.query_row("SELECT title, notes, session_id FROM tasks WHERE id=?1", [task_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-            .map_err(e)?
+        let (t, n, s): (String, String, Option<String>) = c
+            .query_row("SELECT title, notes, session_id FROM tasks WHERE id=?1", [task_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(e)?;
+        let linked = refs(&c, &format!("{t}\n{n}"), task_id);
+        (t, n, s, linked)
     };
     if sid.is_some() {
         return Err("This task already has a session. Reply to continue it.".into());
     }
     // Agents get real paths for attached images and videos.
     let media = app.state::<Media>().0.clone();
-    let notes = notes.replace("](attachments/", &format!("]({}{}", media.display(), std::path::MAIN_SEPARATOR));
-    let prompt = [title.trim(), notes.trim(), TAIL].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("\n\n");
+    let real = |s: &str| s.replace("](attachments/", &format!("]({}{}", media.display(), std::path::MAIN_SEPARATOR));
+    let (notes, linked) = (real(&notes), real(&linked));
+    let prompt = [title.trim(), notes.trim(), linked.trim(), TAIL].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("\n\n");
     start(&app, task_id, &agent, &model, &effort, &access, None, prompt, "prompt")?;
     let db = app.state::<Db>();
     db.0.lock().unwrap().execute("UPDATE tasks SET agent=?1, model=?2, effort=?3, access=?4 WHERE id=?5", params![agent, model, effort, access, task_id]).map_err(e)?;
@@ -497,10 +501,46 @@ fn reply(app: AppHandle, task_id: i64, text: String, model: Option<String>, effo
     if let Some(ag) = &agent { access_args(ag, &access)?; }
     app.state::<Db>().0.lock().unwrap()
         .execute("UPDATE tasks SET model=?1, effort=?2, access=?3 WHERE id=?4", params![model, effort, access, task_id]).map_err(e)?;
+    let linked = refs(&app.state::<Db>().0.lock().unwrap(), &text, task_id);
+    let media = app.state::<Media>().0.clone();
+    let text = if linked.is_empty() { text } else {
+        format!("{text}\n\n{}", linked.replace("](attachments/", &format!("]({}{}", media.display(), std::path::MAIN_SEPARATOR)))
+    };
     match (agent, sid) {
         (Some(a), Some(s)) => start(&app, task_id, &a, &model, &effort, &access, Some(s), text, "reply"),
         _ => Err("No session to resume yet.".into()),
     }
+}
+
+/// `#21` in a prompt means Orlo task or note 21: its title and description go along so the agent knows what the user means.
+fn refs(c: &Connection, text: &str, own: i64) -> String {
+    let mut seen = vec![own];
+    let mut out = String::new();
+    for w in text.split(|ch: char| ch != '#' && !ch.is_ascii_digit()) {
+        let Some(id) = w.strip_prefix('#').and_then(|n| n.parse::<i64>().ok()) else { continue };
+        if seen.contains(&id) { continue; }
+        seen.push(id);
+        let row = c.query_row("SELECT kind, title, notes FROM tasks WHERE id=?1 AND kind IN ('task','note')", [id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        });
+        if let Ok((kind, title, notes)) = row {
+            out += &format!("\n\nOrlo {kind} #{id}: {}\n{}", title.trim(), notes.trim());
+        }
+    }
+    if out.is_empty() { out } else { format!("---\nReferenced from Orlo:{}", out.trim_end()) }
+}
+
+#[cfg(test)]
+#[test]
+fn refs_finds_tasks() {
+    let c = Connection::open_in_memory().unwrap();
+    c.execute_batch("CREATE TABLE tasks(id INTEGER PRIMARY KEY, kind TEXT, title TEXT, notes TEXT);
+        INSERT INTO tasks VALUES (21,'task','Fix login','Safari only'),(22,'chat','x',''),(5,'note','Plan','');").unwrap();
+    let r = refs(&c, "look at #21, #21 and #22 (#5) not #fff or #9 or #1", 1);
+    assert!(r.contains("Orlo task #21: Fix login\nSafari only") && r.contains("Orlo note #5: Plan"));
+    assert_eq!(r.matches("#21").count(), 1);
+    assert!(!r.contains("#22") && !r.contains("#9"));
+    assert_eq!(refs(&c, "nothing here #21", 21), "");
 }
 
 #[tauri::command]
