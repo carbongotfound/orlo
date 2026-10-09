@@ -267,28 +267,65 @@ fn in_editable_dir(path: &str) -> Result<PathBuf, String> {
 
 /// The Code view's Changes panel: "status", "diff" (tracked file), "diff-new" (untracked file) or "discard".
 #[tauri::command]
-fn git(root: String, op: String, path: Option<String>) -> Result<String, String> {
+fn git(root: String, op: String, path: Option<String>, message: Option<String>) -> Result<String, String> {
     let dir = editable(&root)?;
     let path = path.unwrap_or_default();
     if path.starts_with('-') || path.split(['/', '\\']).any(|p| p == "..") { return Err("Bad path.".into()) }
-    let args: Vec<&str> = match op.as_str() {
-        "status" => vec!["status", "--porcelain=v1", "-uall"],
-        "diff" => vec!["diff", "HEAD", "--", &path],
-        "diff-new" => vec!["diff", "--no-index", "--", if cfg!(windows) { "NUL" } else { "/dev/null" }, &path],
-        "discard" => vec!["restore", "--source=HEAD", "--staged", "--worktree", "--", &path],
-        _ => return Err("Unknown git operation.".into()),
+    let run = |args: &[&str]| -> Result<String, String> {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(&dir).args(["-c", "core.quotepath=off", "-c", "color.ui=never"]).args(args).stdin(Stdio::null());
+        #[cfg(windows)]
+        std::os::windows::process::CommandExt::creation_flags(&mut cmd, NO_WINDOW);
+        let out = cmd.output().map_err(|x| format!("git: {x}"))?;
+        // diff --no-index exits 1 when the files differ, which is the point.
+        if !out.status.success() && op != "diff-new" {
+            let err = String::from_utf8_lossy(&out.stderr);
+            return Err(if err.contains("not a git repository") { "not a git repository".into() } else { err.trim().to_string() });
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     };
-    let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(&dir).args(["-c", "core.quotepath=off", "-c", "color.ui=never"]).args(args).stdin(Stdio::null());
-    #[cfg(windows)]
-    std::os::windows::process::CommandExt::creation_flags(&mut cmd, NO_WINDOW);
-    let out = cmd.output().map_err(|x| format!("git: {x}"))?;
-    // diff --no-index exits 1 when the files differ, which is the point.
-    if !out.status.success() && op != "diff-new" {
-        let err = String::from_utf8_lossy(&out.stderr);
-        return Err(if err.contains("not a git repository") { "not a git repository".into() } else { err.trim().to_string() });
+    // `./` keeps the path relative to the project folder, which may sit inside a bigger repository.
+    let head = format!("HEAD:./{path}");
+    match op.as_str() {
+        "status" => run(&["status", "--porcelain=v1", "-uall"]),
+        "diff" => run(&["diff", "HEAD", "--", &path]),
+        "diff-new" => run(&["diff", "--no-index", "--", if cfg!(windows) { "NUL" } else { "/dev/null" }, &path]),
+        "discard" => run(&["restore", "--source=HEAD", "--staged", "--worktree", "--", &path]),
+        // The committed text of a file, for the editor's change bars.
+        "show" => run(&["show", &head]),
+        "commit" => {
+            let msg = message.unwrap_or_default();
+            if msg.trim().is_empty() { return Err("Write a commit message first.".into()) }
+            run(&["add", "-A"])?;
+            run(&["commit", "-q", "-m", msg.trim()])
+        }
+        _ => Err("Unknown git operation.".into()),
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+#[derive(Serialize)]
+struct Hit { path: String, line: usize, col: usize, text: String }
+
+/// Case-insensitive search through the project's text files, for the Code view's search panel.
+#[tauri::command]
+async fn search(root: String, query: String) -> Result<Vec<Hit>, String> {
+    let q = query.to_lowercase();
+    if q.trim().is_empty() { return Ok(Vec::new()) }
+    let dir = editable(&root)?;
+    let mut hits = Vec::new();
+    for path in list_files(root)? {
+        let full = dir.join(&path);
+        if fs::metadata(&full).map_or(true, |m| m.len() > 1_000_000) { continue }
+        // Binary and non-UTF-8 files don't read as text, so they're skipped.
+        let Ok(text) = fs::read_to_string(&full) else { continue };
+        for (i, line) in text.lines().enumerate() {
+            let low = line.to_lowercase();
+            let Some(at) = low.find(&q) else { continue };
+            hits.push(Hit { path: path.clone(), line: i + 1, col: low[..at].chars().count(), text: line.chars().take(300).collect() });
+            if hits.len() >= 2000 { return Ok(hits) }
+        }
+    }
+    Ok(hits)
 }
 
 #[tauri::command]
@@ -367,6 +404,45 @@ fn run_cmd(app: AppHandle, cwd: String, line: String) -> Result<(), String> {
 #[tauri::command]
 fn stop_cmd(term: State<Term>) {
     if let Some(c) = term.0.lock().unwrap().as_mut() { kill_tree(c.id()) }
+}
+
+/// The terminal line that saves the skill where Claude Code looks for it. The user runs it; Orlo itself never writes into ~/.claude.
+/// Empty on Windows when the home folder has a space (it would need quoting that differs between shells); the UI offers the copy instead.
+#[tauri::command]
+fn skill_install() -> String {
+    if !cfg!(windows) {
+        return format!("mkdir -p ~/.claude/skills/orlo && {} skill > ~/.claude/skills/orlo/SKILL.md", cli::exe());
+    }
+    if std::env::var("USERPROFILE").unwrap_or_default().contains(' ') { return String::new() }
+    r#"cmd /c "mkdir %USERPROFILE%\.claude\skills\orlo 2>nul & orlo skill > %USERPROFILE%\.claude\skills\orlo\SKILL.md""#.into()
+}
+
+/// `orlo` in any terminal: shims in %LOCALAPPDATA%\Orlo\bin (orlo.cmd for PowerShell and cmd, `orlo` for Git Bash),
+/// rewritten when the exe moves, and that folder on the user's PATH. Agents started from Orlo see it right away.
+#[cfg(windows)]
+fn put_on_path() {
+    let (Ok(exe), Some(local)) = (std::env::current_exe(), std::env::var_os("LOCALAPPDATA")) else { return };
+    let bin = PathBuf::from(local).join("Orlo").join("bin");
+    let exe = exe.display().to_string();
+    let shims = [("orlo.cmd", format!("@\"{exe}\" %*\r\n")), ("orlo", format!("#!/bin/sh\nexec '{}' \"$@\"\n", exe.replace('\\', "/")))];
+    for (name, text) in &shims {
+        let f = bin.join(name);
+        if fs::read_to_string(&f).ok().as_deref() != Some(text.as_str()) && (fs::create_dir_all(&bin).is_err() || fs::write(&f, text).is_err()) { return }
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    if std::env::split_paths(&path).any(|p| p == bin) { return }
+    if let Ok(p) = std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&path))) { std::env::set_var("PATH", p) }
+    // The user's PATH (never the machine's), keeping its REG_EXPAND_SZ entries; the throwaway variable makes Windows
+    // tell Explorer to reload it, so terminals opened from now on find `orlo`.
+    let script = "$d=$env:ORLO_BIN; $p=(Get-Item HKCU:\\Environment).GetValue('Path','','DoNotExpandEnvironmentNames'); \
+if (($p -split ';') -notcontains $d) { Set-ItemProperty HKCU:\\Environment Path $(if ($p) { $p.TrimEnd(';') + ';' + $d } else { $d }) -Type ExpandString; \
+[Environment]::SetEnvironmentVariable('ORLO_PING','1','User'); [Environment]::SetEnvironmentVariable('ORLO_PING',$null,'User') }";
+    thread::spawn(move || {
+        let mut c = Command::new("powershell");
+        c.args(["-NoProfile", "-NonInteractive", "-Command", script]).env("ORLO_BIN", &bin).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        std::os::windows::process::CommandExt::creation_flags(&mut c, NO_WINDOW);
+        let _ = c.status();
+    });
 }
 
 /// `orlo skill` output, for the command menu's "Copy Orlo skill for AI agents".
@@ -479,7 +555,8 @@ fn delegate(app: AppHandle, task_id: i64, agent: String, model: String, effort: 
     let media = app.state::<Media>().0.clone();
     let real = |s: &str| s.replace("](attachments/", &format!("]({}{}", media.display(), std::path::MAIN_SEPARATOR));
     let (notes, linked) = (real(&notes), real(&linked));
-    let prompt = [title.trim(), notes.trim(), linked.trim(), TAIL].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("\n\n");
+    let tail = tail();
+    let prompt = [title.trim(), notes.trim(), linked.trim(), tail.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("\n\n");
     start(&app, task_id, &agent, &model, &effort, &access, None, prompt, "prompt")?;
     let db = app.state::<Db>();
     db.0.lock().unwrap().execute("UPDATE tasks SET agent=?1, model=?2, effort=?3, access=?4 WHERE id=?5", params![agent, model, effort, access, task_id]).map_err(e)?;
@@ -510,6 +587,13 @@ fn reply(app: AppHandle, task_id: i64, text: String, model: Option<String>, effo
         (Some(a), Some(s)) => start(&app, task_id, &a, &model, &effort, &access, Some(s), text, "reply"),
         _ => Err("No session to resume yet.".into()),
     }
+}
+
+/// The prompt's ending: TAIL, plus the Orlo CLI, so agents started here can reach the user's other tasks without installing the skill.
+fn tail() -> String {
+    let o = cli::exe();
+    format!("{TAIL}\n\nThe user's Orlo tasks and notes are one command away in your shell: `{o} tasks`, `{o} show <id>`, \
+`{o} add \"<title>\"`, `{o} append <id> \"<text>\"`, `{o} done <id>`. `#21` means Orlo task or note 21.")
 }
 
 /// `#21` in a prompt means Orlo task or note 21: its title and description go along so the agent knows what the user means.
@@ -975,6 +1059,9 @@ pub fn run() {
     }
     #[cfg(target_os = "macos")]
     shell_path();
+    // Test and demo copies (ORLO_DATA) leave the real `orlo` command alone.
+    #[cfg(windows)]
+    if std::env::var_os("ORLO_DATA").is_none() { put_on_path() }
     tauri::Builder::default()
         // Registered first: launching Orlo again just brings the open window forward.
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
@@ -1015,7 +1102,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            lists, add_list, rename_list, delete_list, tag_colors, set_tag_color, rename_tag, agent_skill, list_dir, list_files, read_text, write_text, make_dir, rename_path, delete_path, run_cmd, stop_cmd, tasks, add_task, save_task, delete_task, events, clis, running, delegate, reply, stop, install_update, restart, attachments_dir, attach, git
+            lists, add_list, rename_list, delete_list, tag_colors, set_tag_color, rename_tag, agent_skill, skill_install, search, list_dir, list_files, read_text, write_text, make_dir, rename_path, delete_path, run_cmd, stop_cmd, tasks, add_task, save_task, delete_task, events, clis, running, delegate, reply, stop, install_update, restart, attachments_dir, attach, git
         ])
         .build(tauri::generate_context!())
         .expect("error while building orlo")

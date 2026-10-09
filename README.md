@@ -30,6 +30,7 @@ Write a task, hand it to Claude Code, Codex, Grok, Hermes or Gemini, then review
   - Copying always gives you the raw Markdown.
   - **Images and videos:** paste, drop or pick them with the image button. They show inline in notes and task descriptions, and the first image becomes the note's cover.
 - **Code:** a small editor for your projects, with an agent beside it.
+  - **Like VS Code:** change bars in the gutter next to lines you or an agent changed since the last commit, search across files (<kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd>), commit from the Changes panel, file-type icons, <kbd>Ctrl</kbd>+<kbd>Tab</kbd> and <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>W</kbd> for tabs. On a small window the files and chat panels slide over the editor.
   - **Several projects** open at once as tabs along the top; each keeps its own files, terminal and conversation. Recent folders are one click away, and you can drag the borders between the panels to resize them.
   - **Editor:** syntax highlighting, find and replace, multiple cursors, folding, bracket matching and word completion. <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>P</kbd> jumps to any file.
   - **Files:** right-click to create, rename, delete, copy a path or mention a file in the chat.
@@ -150,13 +151,12 @@ orlo reopen 12
 orlo tasks --json     # tasks, notes and show also take --json
 ```
 
-`orlo` is the Orlo app's own executable, so there's nothing extra to install.
+`orlo` is the Orlo app's own executable, so there's nothing extra to install, and it works whether or not the Orlo window is open. On Windows, every time Orlo starts it makes sure `orlo` is on your PATH (a small shim in `%LOCALAPPDATA%\Orlo\bin`, added to your user PATH only), so it works in PowerShell, cmd and Git Bash; open a new terminal after the first launch. On a Mac, use the full path that `orlo skill` prints, or link it into your PATH. Agents you start from Orlo get these commands in their prompt automatically.
 
-**Teach your agent Orlo.** Pick **Copy Orlo skill for AI agents** in the command menu (<kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>K</kbd>), or run `orlo skill`. You get a `SKILL.md` with the full path to Orlo on your machine, the commands, and when to use them. Then either:
+**Teach your other agents Orlo.** The Home screen shows the one line to run until you dismiss it. Or pick **Copy Orlo skill for AI agents** in the command menu (<kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>K</kbd>), or run `orlo skill`. You get a `SKILL.md` with the full path to Orlo on your machine, the commands, and when to use them. Then either:
 - paste it into your agent's instructions (`AGENTS.md`, `CLAUDE.md`, a custom prompt), or
-- save it as a Claude Code skill: `orlo skill > ~/.claude/skills/orlo/SKILL.md` (create the folder first).
+- save it as a Claude Code skill: `orlo skill > ~/.claude/skills/orlo/SKILL.md` (create the folder first; on Windows, `cmd /c "mkdir %USERPROFILE%\.claude\skills\orlo 2>nul & orlo skill > %USERPROFILE%\.claude\skills\orlo\SKILL.md"` does both).
 
-On Windows the exe is a windowed app, so pipe its output when you run it in a terminal yourself (`orlo tasks | more`). Agents capture the output, so they don't need to.
 
 ## Your data
 

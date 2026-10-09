@@ -192,6 +192,11 @@
 .orlo-code .cm-matchingBracket { background: color-mix(in oklch, var(--sidebar-primary) 25%, transparent); outline: none; }
 .orlo-code .cm-foldGutter .cm-gutterElement { padding: 0 4px; cursor: pointer; }
 .orlo-code .cm-foldPlaceholder { background: var(--muted); border: none; color: var(--muted-foreground); padding: 0 4px; }
+.orlo-code .cm-git .cm-gutterElement { width: 3px; padding: 0; margin-left: 2px; }
+.orlo-code .cm-git-a, .orlo-code .cm-git-m { width: 3px; height: 100%; border-radius: 1px; }
+.orlo-code .cm-git-a { background: oklch(0.66 0.15 150); }
+.orlo-code .cm-git-m { background: oklch(0.63 0.13 240); }
+.orlo-code .cm-git-d { width: 0; height: 0; margin-top: -4px; border-block: 4px solid transparent; border-left: 5px solid oklch(0.62 0.2 25); }
 .orlo-code .cm-selectionMatch { background: color-mix(in oklch, var(--sidebar-primary) 15%, transparent); }
 .orlo-code .cm-searchMatch { background: color-mix(in oklch, oklch(0.8 0.15 85) 35%, transparent); outline: 1px solid color-mix(in oklch, oklch(0.8 0.15 85) 60%, transparent); }
 .orlo-code .cm-searchMatch-selected { background: color-mix(in oklch, oklch(0.8 0.15 85) 60%, transparent); }
