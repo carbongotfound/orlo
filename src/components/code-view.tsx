@@ -3,9 +3,9 @@ import { invoke } from "@tauri-apps/api/core"
 import { listen } from "@tauri-apps/api/event"
 import { getCurrentWindow } from "@tauri-apps/api/window"
 import { ask as askDialog, open as pickFolder } from "@tauri-apps/plugin-dialog"
-import { Compartment, EditorState } from "@codemirror/state"
+import { Compartment, EditorState, RangeSet, StateEffect, StateField } from "@codemirror/state"
 import {
-  crosshairCursor, drawSelection, dropCursor, EditorView, highlightActiveLine, highlightActiveLineGutter,
+  crosshairCursor, drawSelection, dropCursor, EditorView, gutter, GutterMarker, highlightActiveLine, highlightActiveLineGutter,
   highlightSpecialChars, keymap, lineNumbers, rectangularSelection,
 } from "@codemirror/view"
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands"
@@ -17,8 +17,9 @@ import { autocompletion, closeBrackets, closeBracketsKeymap, completeAnyWord, co
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search"
 import { tags as t } from "@lezer/highlight"
 import {
-  ArrowUp, ChevronRight, File, FilePlus, Folder, FolderOpen, FolderPlus, MessageSquarePlus, PanelBottom, PanelLeft, PanelRight,
-  Pencil, Play, Plus, RefreshCw, Search, Square, SquareTerminal, Trash2, Undo2, X,
+  ArrowUp, ChevronRight, File, FileCode, FileCog, FileImage, FileJson, FilePlus, Files, FileTerminal, FileText, Folder, FolderOpen,
+  FolderPlus, GitBranch, GitCommitHorizontal, MessageSquarePlus, PanelBottom, PanelLeft, PanelRight, Pencil, Play, Plus, RefreshCw,
+  Search, Square, SquareTerminal, Trash2, Undo2, X, type LucideIcon,
 } from "lucide-react"
 import { toast } from "sonner"
 import { cn } from "cn"
@@ -31,6 +32,8 @@ import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTi
 import { Kbd } from "@/components/ui/kbd"
 import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { useDraft } from "@/draft"
+import { lineChanges } from "@/linediff"
 
 // The Code view: project folders with a file tree, an editor, a terminal and an agent chat that works in the folder.
 // Files go through list_dir/read_text/write_text/... in lib.rs, which refuse the agents' sign-in folders.
@@ -40,6 +43,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 type Entry = { name: string; dir: boolean }
 type Cli = { name: string; path: string | null }
 type Ev = { task_id: number; kind: string; text: string }
+type Hit = { path: string; line: number; col: number; text: string }
 type Chat = { id: number; title: string; agent: string | null; session_id: string | null; cwd: string | null; model: string; effort: string; access: string }
 type Shared = {
   clis: Cli[]; chats: Chat[]; running: number[]; refresh: () => void
@@ -86,6 +90,37 @@ let termOwner: string | null = null
 
 // Task bookkeeping (verdicts, a clean exit) means nothing in a conversation.
 const chatEvent = (ev: Ev) => ev.kind !== "verdict" && !(ev.kind === "end" && ev.text === "Exited with code 0.")
+const SHIFT = MAC ? "⇧" : "Shift+"
+
+// Change bars in the editor's gutter against the last commit, like VS Code's: added, modified, deleted here.
+class GitMark extends GutterMarker {
+  constructor(readonly kind: string) { super() }
+  eq(o: GitMark) { return o.kind === this.kind }
+  toDOM() { const d = document.createElement("div"); d.className = `cm-git-${this.kind}`; return d }
+}
+const MARKS = { a: new GitMark("a"), m: new GitMark("m"), d: new GitMark("d") }
+const setGit = StateEffect.define<RangeSet<GutterMarker>>()
+const gitField = StateField.define<RangeSet<GutterMarker>>({
+  create: () => RangeSet.empty,
+  update: (v, tr) => { v = v.map(tr.changes); for (const e of tr.effects) if (e.is(setGit)) v = e.value; return v },
+})
+const gitGutter = [gitField, gutter({ class: "cm-git", markers: (v) => v.state.field(gitField) })]
+
+const ICONS: [RegExp, LucideIcon, string][] = [
+  [/\.(tsx?|jsx?|mjs|cjs|vue|svelte)$/i, FileCode, "text-sky-500"],
+  [/\.(py|rb|go|rs|java|kt|swift|c|cc|cpp|h|hpp|cs|php|lua|dart|zig)$/i, FileCode, "text-violet-500"],
+  [/\.(html?|css|scss|sass|less|xml|svg)$/i, FileCode, "text-orange-500"],
+  [/\.jsonc?$/i, FileJson, "text-amber-500"],
+  [/\.(md|mdx|txt|rst|log)$/i, FileText, "text-muted-foreground"],
+  [/\.(png|jpe?g|gif|webp|ico|bmp|avif)$/i, FileImage, "text-pink-500"],
+  [/\.(sh|bash|zsh|ps1|bat|cmd)$/i, FileTerminal, "text-emerald-500"],
+  [/(\.(toml|ya?ml|ini|lock|env|cfg|conf)|^\.[\w.-]*rc|^\.git\w*|^dockerfile)$/i, FileCog, "text-muted-foreground"],
+]
+function FileIcon({ name, className }: { name: string; className?: string }) {
+  const hit = ICONS.find(([re]) => re.test(name))
+  const Icon = hit?.[1] ?? File
+  return <Icon className={cn("size-4 shrink-0", hit?.[2] ?? "text-muted-foreground", className)} />
+}
 
 export function CodeWorkspace({ visible, focus, ...shared }: Shared & { visible: boolean; focus: { cwd: string; id: number; n: number } | null }) {
   const [projects, setProjects] = useState<string[]>(() => {
@@ -225,12 +260,71 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
   const [quick, setQuick] = useState(false)
   const [files, setFiles] = useState<string[]>([])
 
+  // On a small window the side panels slide over the editor, one at a time.
+  const outer = useRef<HTMLDivElement>(null)
+  const [narrow, setNarrow] = useState(false)
+  const narrowRef = useRef(narrow)
+  narrowRef.current = narrow
+  useEffect(() => {
+    const el = outer.current
+    if (!el) return
+    const ro = new ResizeObserver(([en]) => { if (en.contentRect.width) setNarrow(en.contentRect.width < 820) })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  useEffect(() => { if (narrow) setPanels((p) => (p.tree && p.chat ? { ...p, tree: false } : p)) }, [narrow])
+  const showChat = () => setPanels((p) => ({ ...p, chat: true, tree: narrowRef.current ? false : p.tree }))
+
   const host = useRef<HTMLDivElement>(null)
   const view = useRef<EditorView | null>(null)
   const states = useRef(new Map<string, EditorState>())
   const saved = useRef(new Map<string, string>())
   const activeRef = useRef(active)
   activeRef.current = active
+  const tabsRef = useRef(tabs)
+  tabsRef.current = tabs
+
+  // The committed text of each open file, for the change bars ("" for a new file; missing means no bars).
+  const heads = useRef(new Map<string, string>())
+  const changesRef = useRef<[string, string][] | null>(null)
+  const paint = (path: string) => {
+    const head = heads.current.get(path), s = states.current.get(path)
+    if (!s) return
+    const marks = new Map<number, GitMark>()
+    if (head !== undefined) {
+      for (const [line, k] of lineChanges(head, s.doc.toString())) {
+        const l = Math.min(line, s.doc.lines)
+        if (!marks.has(l)) marks.set(l, MARKS[k])
+      }
+    }
+    const set = RangeSet.of([...marks].sort((x, y) => x[0] - y[0]).map(([l, m]) => m.range(s.doc.line(l).from)))
+    if (activeRef.current === path && view.current) {
+      view.current.dispatch({ effects: setGit.of(set) })
+      states.current.set(path, view.current.state)
+    } else states.current.set(path, s.update({ effects: setGit.of(set) }).state)
+  }
+  const paintRef = useRef(paint)
+  paintRef.current = paint
+  const paintT = useRef(0)
+  const loadHead = async (path: string) => {
+    if (!path.startsWith(root)) return
+    const r = rel(path).split("\\").join("/")
+    try { heads.current.set(path, (await invoke<string>("git", { root, op: "show", path: r })).replace(/\r\n?/g, "\n")) }
+    catch { if (changesRef.current?.some(([st, p]) => st === "??" && p === r)) heads.current.set(path, ""); else heads.current.delete(path) }
+    paintRef.current(path)
+  }
+
+  // Search results and "go to line": the jump waits for the file's editor state to be on screen.
+  const jump = useRef<{ path: string; line: number; col: number; len: number } | null>(null)
+  const applyJump = () => {
+    const j = jump.current, v = view.current
+    if (!j || !v || j.path !== activeRef.current) return
+    jump.current = null
+    const l = v.state.doc.line(Math.min(j.line, v.state.doc.lines))
+    const from = Math.min(l.from + j.col, l.to)
+    v.dispatch({ selection: { anchor: from, head: Math.min(from + j.len, l.to) }, effects: EditorView.scrollIntoView(from, { y: "center" }) })
+    v.focus()
+  }
 
   useEffect(() => { unsaved.set(root, dirty.length) }, [dirty, root])
 
@@ -256,7 +350,7 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
     const s = EditorState.create({
       doc: text,
       extensions: [
-        lineNumbers(), foldGutter(), highlightActiveLineGutter(), highlightSpecialChars(), history(), drawSelection(), dropCursor(),
+        lineNumbers(), gitGutter, foldGutter(), highlightActiveLineGutter(), highlightSpecialChars(), history(), drawSelection(), dropCursor(),
         EditorState.allowMultipleSelections.of(true), indentOnInput(), bracketMatching(), closeBrackets(), autocompletion(),
         rectangularSelection(), crosshairCursor(), highlightActiveLine(), highlightSelectionMatches(),
         syntaxHighlighting(highlight), syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
@@ -276,6 +370,8 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
           }
           if (!u.docChanged) return
           states.current.set(path, u.state)
+          clearTimeout(paintT.current)
+          paintT.current = window.setTimeout(() => paintRef.current(path), 250)
           const isDirty = u.state.doc.toString() !== saved.current.get(path)
           setDirty((d) => (isDirty ? (d.includes(path) ? d : [...d, path]) : d.filter((x) => x !== path)))
         }),
@@ -299,6 +395,7 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
       if (text === undefined) return
       saved.current.set(path, text)
       states.current.set(path, makeState(path, text))
+      loadHead(path)
     }
     setTabs((ts) => (ts.includes(path) ? ts : [...ts, path]))
     setActive(path)
@@ -327,6 +424,7 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
       const m = s.selection.main, line = s.doc.lineAt(m.head)
       setCursor({ line: line.number, col: m.head - line.from + 1, sel: m.to - m.from })
       if (visible) view.current.focus()
+      applyJump()
     }
   }, [active])
   useEffect(() => () => { view.current?.destroy(); view.current = null; unsaved.delete(root) }, [])
@@ -337,28 +435,30 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
     reloadTree()
     loadChanges()
     for (const path of tabs) {
-      if (dirty.includes(path)) continue
+      if (dirty.includes(path)) { loadHead(path); continue }
       invoke<string>("read_text", { path }).then((text) => {
         if (text === saved.current.get(path)) return
         saved.current.set(path, text)
         const s = makeState(path, text)
         states.current.set(path, s)
         if (activeRef.current === path) view.current?.setState(s)
-      }).catch(() => dropTab(path))
+      }).catch(() => dropTab(path)).finally(() => loadHead(path))
     }
   }
   const syncRef = useRef(syncFromDisk)
   syncRef.current = syncFromDisk
 
   // ---- git changes: what the agent (or you) changed since the last commit ----
-  const [side, setSide] = useState<"files" | "changes">("files")
+  const [side, setSide] = useState<"files" | "search" | "changes">("files")
   const [changes, setChanges] = useState<[status: string, path: string][] | null>(null)
   const [diff, setDiff] = useState<{ path: string; status: string; text: string } | null>(null)
   const loadChanges = async () => {
     try {
       const out = await invoke<string>("git", { root, op: "status" })
-      setChanges(out.split("\n").filter(Boolean).map((l) => [l.slice(0, 2), l.slice(3).replace(/^.* -> /, "").replace(/^"|"$/g, "")]))
-    } catch { setChanges(null) }
+      const list = out.split("\n").filter(Boolean).map((l): [string, string] => [l.slice(0, 2), l.slice(3).replace(/^.* -> /, "").replace(/^"|"$/g, "")])
+      changesRef.current = list
+      setChanges(list)
+    } catch { changesRef.current = null; setChanges(null) }
   }
   useEffect(() => { loadChanges() }, [root])
   const showDiff = async (status: string, path: string) => {
@@ -372,6 +472,54 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
     if (ok === undefined) return
     setDiff(null)
     syncFromDisk()
+  }
+
+  const [msg, setMsg] = useDraft(`orlo.draft.commit.${root}`)
+  const commit = async () => {
+    if (!msg.trim()) return void toast.error("Write a commit message first.")
+    if (dirty.length && !(await sure(`${dirty.length} open file${dirty.length > 1 ? "s have" : " has"} unsaved edits that won't be in this commit. Commit anyway?`))) return
+    if ((await call("git", { root, op: "commit", message: msg.trim() })) === undefined) return
+    setMsg("")
+    setDiff(null)
+    toast.success("Committed")
+    syncFromDisk()
+  }
+
+  // ---- search in files ----
+  const [q, setQ] = useState("")
+  const [hits, setHits] = useState<Hit[] | null>(null)
+  const searchBox = useRef<HTMLInputElement>(null)
+  const seq = useRef(0)
+  useEffect(() => {
+    const n = ++seq.current
+    if (!q.trim()) return setHits(null)
+    const t = setTimeout(() => invoke<Hit[]>("search", { root, query: q })
+      .then((h) => { if (n === seq.current) setHits(h) })
+      .catch((e) => { if (n === seq.current) { toast.error(String(e)); setHits([]) } }), 250)
+    return () => clearTimeout(t)
+  }, [q, root])
+  const groups = useMemo(() => {
+    const m = new Map<string, Hit[]>()
+    for (const h of hits ?? []) { const g = m.get(h.path); if (g) g.push(h); else m.set(h.path, [h]) }
+    return [...m]
+  }, [hits])
+  const goTo = async (path: string, line: number, col = 0, len = 0) => {
+    jump.current = { path, line, col, len }
+    if (narrowRef.current) setPanels((p) => ({ ...p, tree: false }))
+    setDiff(null)
+    await openFile(path)
+    if (activeRef.current === path) applyJump()
+  }
+  const marked = (text: string) => {
+    let s = text.trimStart(), i = s.toLowerCase().indexOf(q.toLowerCase())
+    if (i > 40) { s = "…" + s.slice(i - 30); i = 31 }
+    return i < 0 ? s : <>{s.slice(0, i)}<mark className="rounded-sm bg-amber-400/35 text-foreground">{s.slice(i, i + q.length)}</mark>{s.slice(i + q.length)}</>
+  }
+  const openSide = (k: "files" | "search" | "changes") => {
+    setPanels((p) => ({ ...p, tree: true, chat: narrowRef.current ? false : p.chat }))
+    setSide(k)
+    if (k === "changes") loadChanges()
+    if (k === "search") requestAnimationFrame(() => searchBox.current?.select())
   }
 
   // ---- file operations ----
@@ -468,7 +616,7 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
   const cur: Pick = agent === pick.agent ? pick : { ...noPick, agent }
   const [events, setEvents] = useState<Ev[]>([])
   const [live, setLive] = useState("")
-  const [prompt, setPrompt] = useState("")
+  const [prompt, setPrompt] = useDraft(`orlo.draft.code.${root}`)
   const [cmds, setCmds] = useState<Record<string, string[]>>(() => store.get("orlo.agentCommands", AGENT_COMMANDS))
   const [menuAt, setMenuAt] = useState(0)
   const [caret, setCaret] = useState(0)
@@ -483,7 +631,7 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
     if (chatId == null) return setEvents([])
     call<Ev[]>("events", { taskId: chatId }).then((es) => setEvents(es ?? []))
   }, [chatId])
-  useEffect(() => { if (focusChat) { setChatId(focusChat.id); setPanels((p) => ({ ...p, chat: true })) } }, [focusChat])
+  useEffect(() => { if (focusChat) { setChatId(focusChat.id); showChat() } }, [focusChat])
   // A chat picks its own agent and settings back up when you reopen it.
   useEffect(() => { if (chat?.agent) setPick({ agent: chat.agent, model: chat.model, effort: chat.effort, access: chat.access }) }, [chat?.id])
   useEffect(() => {
@@ -571,11 +719,23 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
   }
 
   // ---- shortcuts while this project is on screen ----
+  const openSideRef = useRef(openSide)
+  openSideRef.current = openSide
+  const closeRef = useRef(closeTab)
+  closeRef.current = closeTab
   useEffect(() => {
     if (!visible) return
     const onKey = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey) || e.altKey) return
       const k = e.key.toLowerCase()
+      if (e.shiftKey && (k === "f" || k === "e" || k === "g")) { e.preventDefault(); openSideRef.current(k === "f" ? "search" : k === "e" ? "files" : "changes"); return }
+      if (k === "w") { e.preventDefault(); if (activeRef.current) closeRef.current(activeRef.current); return }
+      if (k === "tab") {
+        e.preventDefault()
+        const ts = tabsRef.current, i = ts.indexOf(activeRef.current ?? "")
+        if (ts.length) { setDiff(null); setActive(ts[(i + (e.shiftKey ? ts.length - 1 : 1) + ts.length) % ts.length]) }
+        return
+      }
       if (k === "p") { e.preventDefault(); indexFiles(); setQuick(true) }
       else if (k === "`" || k === "j") { e.preventDefault(); setPanels((p) => ({ ...p, term: !p.term })); requestAnimationFrame(() => termInput.current?.focus()) }
       else if (k === "l") {
@@ -588,11 +748,11 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
           const a = v.state.doc.lineAt(sel.from).number, b = v.state.doc.lineAt(to).number
           const where = `${rel(activeRef.current).split("\\").join("/")}:${a === b ? a : `${a}-${b}`}`
           const quote = `@${where}\n\`\`\`\n${v.state.sliceDoc(sel.from, sel.to)}\n\`\`\`\n`
-          setPanels((p) => ({ ...p, chat: true }))
+          showChat()
           setPrompt((x) => (x.trim() ? `${x.trimEnd()}\n\n${quote}` : quote))
           requestAnimationFrame(() => { const t = box.current; if (t) { t.focus(); t.setSelectionRange(t.value.length, t.value.length) } })
         } else if (panels.chat && document.activeElement !== box.current) box.current?.focus()
-        else { setPanels((p) => ({ ...p, chat: !p.chat })); requestAnimationFrame(() => box.current?.focus()) }
+        else { setPanels((p) => ({ ...p, chat: !p.chat, tree: narrowRef.current && !p.chat ? false : p.tree })); requestAnimationFrame(() => box.current?.focus()) }
       }
     }
     const onF5 = (e: KeyboardEvent) => { if (e.key === "F5") { e.preventDefault(); runRef.current() } }
@@ -626,13 +786,13 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
                 className={cn("flex w-full cursor-default items-center gap-1.5 truncate rounded-md py-1 pr-2 text-left text-sm hover:bg-muted", active === path && "bg-muted font-medium")}
                 style={{ paddingLeft: 6 + depth * 12 }}
                 onClick={() => {
-                  if (!en.dir) return void openFile(path)
+                  if (!en.dir) { if (narrow) setPanels((p) => ({ ...p, tree: false })); return void openFile(path) }
                   setOpenDirs((o) => (isOpen ? o.filter((x) => x !== path) : [...o, path]))
                   if (!isOpen) load(path)
                 }}
               >
                 {en.dir ? <ChevronRight className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", isOpen && "rotate-90")} /> : <span className="w-3.5 shrink-0" />}
-                {en.dir ? <Folder className="size-4 shrink-0 text-muted-foreground" /> : <File className="size-4 shrink-0 text-muted-foreground" />}
+                {en.dir ? <Folder className="size-4 shrink-0 text-muted-foreground" /> : <FileIcon name={en.name} />}
                 <span className={cn("truncate", dirty.includes(path) && "italic")}>{en.name}</span>
               </ContextMenuTrigger>
               <ContextMenuContent className="min-w-44">
@@ -641,7 +801,7 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
                   <ContextMenuItem onClick={() => { setOpenDirs((o) => (o.includes(path) ? o : [...o, path])); load(path); setNaming({ dir: path, folder: true }) }}><FolderPlus />New folder</ContextMenuItem>
                   <ContextMenuSeparator />
                 </>}
-                <ContextMenuItem onClick={() => { setPanels((p) => ({ ...p, chat: true })); setPrompt((x) => `${x}${x && !x.endsWith(" ") ? " " : ""}@${rel(path).split("\\").join("/")} `); requestAnimationFrame(() => box.current?.focus()) }}>
+                <ContextMenuItem onClick={() => { showChat(); setPrompt((x) => `${x}${x && !x.endsWith(" ") ? " " : ""}@${rel(path).split("\\").join("/")} `); requestAnimationFrame(() => box.current?.focus()) }}>
                   <MessageSquarePlus />Mention in chat
                 </ContextMenuItem>
                 <ContextMenuItem onClick={() => navigator.clipboard.writeText(path).then(() => toast.success("Path copied"))}><File />Copy path</ContextMenuItem>
@@ -656,7 +816,10 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
     </>
   )
 
-  const toggle = (k: keyof typeof panels) => setPanels((p) => ({ ...p, [k]: !p[k] }))
+  // Opening one side panel on a small window closes the other.
+  const toggle = (k: keyof typeof panels) => setPanels((p) => ({
+    ...p, [k]: !p[k], ...(narrow && !p[k] && k !== "term" ? { [k === "tree" ? "chat" : "tree"]: false } : {}),
+  }))
   const [quickQ, setQuickQ] = useState("")
   const quickHits = useMemo(() => {
     const s = quickQ.toLowerCase().replace(/\s+/g, "")
@@ -667,7 +830,7 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
   }, [quickQ, files])
 
   return (
-    <div className={cn("flex h-full min-h-0 flex-col", !shown && "hidden")}>
+    <div ref={outer} className={cn("flex h-full min-h-0 flex-col", !shown && "hidden")}>
       <div className="flex h-9 shrink-0 items-stretch border-b bg-muted/30">
         {strip}
         <div className="ml-auto flex items-center gap-0.5 px-1">
@@ -680,15 +843,21 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-1">
+      <div className="relative flex min-h-0 flex-1">
+        {narrow && (panels.tree || panels.chat) && (
+          <div className="absolute inset-0 z-20 bg-black/30 duration-150 animate-in fade-in-0" onClick={() => setPanels((p) => ({ ...p, tree: false, chat: false }))} />
+        )}
         {panels.tree && (
-          <aside className="flex max-w-[35%] shrink-0 flex-col" style={{ width: sizes.tree }}>
-            <div className="flex h-8 items-center gap-0.5 pr-1 pl-2">
-              {(["files", "changes"] as const).map((k) => (
-                <button key={k} onClick={() => { setSide(k); if (k === "changes") loadChanges() }}
-                  className={cn("rounded px-1.5 py-0.5 text-[11px] font-medium tracking-wide uppercase", side === k ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground")}>
-                  {k === "files" ? "Files" : <>Changes{changes?.length ? <span className="ml-1 rounded-full bg-primary px-1 text-[10px] text-primary-foreground">{changes.length}</span> : null}</>}
-                </button>
+          <aside className={cn("flex shrink-0 flex-col", narrow ? "absolute inset-y-0 left-0 z-30 max-w-[85%] border-r bg-background shadow-xl" : "max-w-[35%]")} style={{ width: sizes.tree }}>
+            <div className="flex h-9 items-center gap-0.5 pr-1 pl-1.5">
+              {([["files", Files, "Files", "E"], ["search", Search, "Search in files", "F"], ["changes", GitBranch, "Changes", "G"]] as const).map(([k, Icon, label, key]) => (
+                <Tip key={k} label={<>{label} <Kbd>{MOD}{SHIFT}{key}</Kbd></>}>
+                  <button aria-label={label} onClick={() => openSide(k)}
+                    className={cn("relative grid size-7 place-items-center rounded-md", side === k ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground")}>
+                    <Icon className="size-4" />
+                    {k === "changes" && changes?.length ? <span className="absolute -top-0.5 -right-0.5 min-w-3.5 rounded-full bg-primary px-1 text-center text-[9px] leading-3.5 font-medium text-primary-foreground">{changes.length}</span> : null}
+                  </button>
+                </Tip>
               ))}
               {side === "files" && <>
               <Tip label="New file"><Button variant="ghost" size="icon-xs" className="ml-auto text-muted-foreground" aria-label="New file" onClick={() => setNaming({ dir: root, folder: false })}><FilePlus /></Button></Tip>
@@ -696,8 +865,48 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
               <Tip label="Reload"><Button variant="ghost" size="icon-xs" className="text-muted-foreground" aria-label="Reload files" onClick={reloadTree}><RefreshCw /></Button></Tip>
               </>}
             </div>
-            {side === "files" ? <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-2">{tree(root, 0)}</div> : (
+            {side === "files" ? <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-2">{tree(root, 0)}</div> : side === "search" ? (
+              <div className="flex min-h-0 flex-1 flex-col">
+                <div className="px-2 pb-2">
+                  <input
+                    ref={searchBox} value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search in files" spellCheck={false}
+                    className="h-7 w-full rounded-md border bg-background px-2 text-xs outline-none focus:ring-1 focus:ring-ring"
+                    onKeyDown={(e) => { if (e.key === "Escape") setQ("") }}
+                  />
+                  {hits && <p className="px-0.5 pt-1.5 text-[11px] text-muted-foreground">{hits.length ? `${hits.length}${hits.length >= 2000 ? "+" : ""} result${hits.length > 1 ? "s" : ""} in ${groups.length} file${groups.length > 1 ? "s" : ""}` : "No results"}</p>}
+                </div>
+                <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-2">
+                  {groups.map(([p, hs]) => (
+                    <div key={p} className="mb-1">
+                      <div className="flex items-center gap-1.5 px-2 py-1 text-xs" title={p}>
+                        <FileIcon name={base(p)} className="size-3.5" /><span className="truncate font-medium">{base(p)}</span>
+                        <span className="truncate text-[11px] text-muted-foreground">{p.includes("/") ? parent(p) : ""}</span>
+                        <span className="ml-auto rounded-full bg-muted px-1.5 text-[10px] text-muted-foreground">{hs.length}</span>
+                      </div>
+                      {hs.map((h) => (
+                        <button key={h.line} className="flex w-full items-baseline gap-2 rounded-md py-0.5 pr-2 pl-3 text-left font-mono text-[11px] hover:bg-muted"
+                          onClick={() => goTo(join(root, p.split("/").join(sep)), h.line, h.col, q.length)}>
+                          <span className="w-7 shrink-0 text-right text-muted-foreground/60">{h.line}</span><span className="truncate">{marked(h.text)}</span>
+                        </button>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
               <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-2 text-sm">
+                {!!changes?.length && (
+                  <div className="flex flex-col gap-1.5 px-1 pb-2">
+                    <textarea
+                      value={msg} onChange={(e) => setMsg(e.target.value)} rows={2} placeholder="Commit message"
+                      className="w-full resize-none rounded-md border bg-background px-2 py-1.5 text-xs outline-none focus:ring-1 focus:ring-ring"
+                      onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); commit() } }}
+                    />
+                    <Tip label={<>Stage everything and commit <Kbd>{MOD}Enter</Kbd></>}>
+                      <Button size="xs" disabled={!msg.trim()} onClick={commit}><GitCommitHorizontal />Commit all</Button>
+                    </Tip>
+                  </div>
+                )}
                 {changes === null ? <p className="px-2 py-3 text-xs text-muted-foreground">This folder isn't a git repository, so there's nothing to compare against.</p>
                   : !changes.length ? <p className="px-2 py-3 text-xs text-muted-foreground">No changes since the last commit.</p>
                   : changes.map(([st, path]) => (
@@ -715,13 +924,15 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
           </aside>
         )}
 
-        {panels.tree && <Grip dir="x" onDrag={(d) => resize("tree", d, 140, 480)} />}
+        {panels.tree && !narrow && <Grip dir="x" onDrag={(d) => resize("tree", d, 140, 480)} />}
         <div className="flex min-w-0 flex-1 flex-col">
           <div className="flex h-9 shrink-0 items-stretch overflow-x-auto border-b">
             {tabs.map((p) => (
               <div key={p} className={cn("group flex shrink-0 items-center gap-1 border-r pr-1 pl-3 text-xs", p === active ? "bg-background text-foreground" : "bg-muted/40 text-muted-foreground")}
                 onMouseDown={(e) => { if (e.button === 1) { e.preventDefault(); closeTab(p) } }}>
-                <button className="max-w-48 truncate" title={rel(p)} onClick={() => { setActive(p); setDiff(null) }}>{base(p)}</button>
+                <button className="flex max-w-48 items-center gap-1.5" title={rel(p)} onClick={() => { setActive(p); setDiff(null) }}>
+                  <FileIcon name={base(p)} className="size-3.5" /><span className="truncate">{base(p)}</span>
+                </button>
                 <button className="grid size-4 place-items-center rounded hover:bg-muted" aria-label={`Close ${rel(p)}`} onClick={() => closeTab(p)}>
                   {dirty.includes(p) ? <span className="size-1.5 rounded-full bg-foreground group-hover:hidden" /> : null}
                   <X className={cn("size-3", dirty.includes(p) && "hidden group-hover:block")} />
@@ -771,6 +982,8 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
                   <span>Terminal</span><Kbd>{MOD}J</Kbd>
                   <span>Agent chat (or ask about the selection)</span><Kbd>{MOD}L</Kbd>
                   <span>Run file</span><Kbd>F5</Kbd>
+                  <span>Search in files</span><Kbd>{MOD}{SHIFT}F</Kbd>
+                  <span>Next tab, close tab</span><Kbd>{MOD}Tab, {MOD}W</Kbd>
                 </div>
               </div>
             )}
@@ -822,8 +1035,8 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
 
         {panels.chat && (
           <>
-          <Grip dir="x" onDrag={(d) => resize("chat", -d, 280, 720)} />
-          <aside className="flex max-w-[50%] shrink-0 flex-col" style={{ width: sizes.chat }}>
+          {!narrow && <Grip dir="x" onDrag={(d) => resize("chat", -d, 280, 720)} />}
+          <aside className={cn("flex shrink-0 flex-col", narrow ? "absolute inset-y-0 right-0 z-30 max-w-full border-l bg-background shadow-xl" : "max-w-[50%]")} style={{ width: sizes.chat }}>
             <div className="flex h-9 shrink-0 items-center gap-1 border-b px-2">
               <select
                 className="min-w-0 flex-1 truncate rounded-md bg-transparent px-1 py-1 text-xs font-medium outline-none hover:bg-muted"
@@ -855,6 +1068,14 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
               )}
               <div ref={chatEnd} />
             </div>
+            {!!changes?.length && !busy && (
+              <button className="mx-2 mb-2 flex shrink-0 items-center gap-2 rounded-lg border bg-muted/30 px-3 py-1.5 text-left text-xs hover:bg-muted"
+                onClick={() => { openSide("changes"); showDiff(changes[0][0], changes[0][1]) }}>
+                <GitBranch className="size-3.5 text-muted-foreground" />
+                <span className="flex-1">{changes.length} changed file{changes.length > 1 ? "s" : ""}</span>
+                <span className="font-medium">Review</span><ChevronRight className="size-3.5" />
+              </button>
+            )}
             <div className="shrink-0 p-2 pt-0">
               <div className="relative rounded-xl border bg-muted/30 shadow-xs transition-colors focus-within:border-ring/60 focus-within:bg-background">
                 {menu.length > 0 && (
@@ -905,7 +1126,7 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
             <CommandEmpty>No matching files.</CommandEmpty>
             {quickHits.map((f) => (
               <CommandItem key={f} value={f} onSelect={() => { setQuick(false); setQuickQ(""); openFile(join(root, f.split("/").join(sep))) }}>
-                <File /><span className="truncate">{base(f)}</span><span className="ml-auto truncate text-xs text-muted-foreground">{f}</span>
+                <FileIcon name={base(f)} /><span className="truncate">{base(f)}</span><span className="ml-auto truncate text-xs text-muted-foreground">{f}</span>
               </CommandItem>
             ))}
           </CommandList>

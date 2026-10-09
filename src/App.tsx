@@ -10,6 +10,7 @@ import {
   Brain, Shield, TriangleAlert, Wrench, X,
 } from "lucide-react"
 import { toast } from "sonner"
+import { useDraft } from "@/draft"
 import { cn } from "cn"
 import { Toaster } from "@/components/ui/sonner"
 import { AgentIcon } from "@/components/agent-icon"
@@ -966,7 +967,7 @@ function Composer({ kind, clis, tags, inputRef, onAdd }: {
   kind: Mode; clis: Cli[]; tags: string[]; inputRef: React.RefObject<HTMLInputElement | null>
   onAdd: (text: string, tags: string[], agent: Pick, kind: Mode, due: string | null) => void
 }) {
-  const [text, setText] = useState("")
+  const [text, setText] = useDraft(`orlo.draft.${kind}`)
   const [picked, setPicked] = useState<string[]>([])
   const [agent, setAgent] = useState<Pick>(noPick)
   const [due, setDue] = useState<string | null>(null)
@@ -1228,6 +1229,7 @@ function Home({ tasks, ctx, go, setLayout, composer }: { tasks: Task[]; ctx: Ctx
         </p>
       </div>
       {composer}
+      <SkillTip />
 
       <div className="grid grid-cols-2 gap-4 *:data-[slot=card]:bg-gradient-to-t *:data-[slot=card]:from-primary/5 *:data-[slot=card]:to-card *:data-[slot=card]:shadow-xs @4xl/main:grid-cols-4">
         {stats.map((s) => (
@@ -1421,6 +1423,36 @@ async function copySkill() {
   })
 }
 
+// Home's reminder that agents outside Orlo can use it too; Orlo's own agents already get the CLI in their prompt.
+function SkillTip() {
+  const [hidden, setHidden] = useState(() => { try { return !!localStorage.getItem("orlo.skillTip") } catch { return false } })
+  const [line, setLine] = useState("")
+  useEffect(() => { if (!hidden) call<string>("skill_install").then((l) => setLine(l ?? "")) }, [hidden])
+  if (hidden) return null
+  const hide = () => { try { localStorage.setItem("orlo.skillTip", "1") } catch { /* private mode */ } setHidden(true) }
+  return (
+    <Card size="sm" className="duration-300 animate-in fade-in-0">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-sm"><Bot className="size-4" />Give your other agents Orlo</CardTitle>
+        <CardDescription>
+          Agents you start here already know your tasks. To let Claude Code list, add and check them off too (and know what <code>#21</code> means),
+          run this once in a new terminal:
+        </CardDescription>
+        <CardAction><Button variant="ghost" size="icon-xs" className="text-muted-foreground" aria-label="Dismiss" onClick={hide}><X /></Button></CardAction>
+      </CardHeader>
+      <CardContent className="flex flex-col items-start gap-2">
+        {line && (
+          <div className="flex w-full items-center gap-2 rounded-md border bg-muted/40 py-1 pr-1 pl-3">
+            <code className="min-w-0 flex-1 truncate font-mono text-xs" title={line}>{line}</code>
+            <Button size="xs" variant="ghost" onClick={() => navigator.clipboard.writeText(line).then(() => toast.success("Copied. Paste it into a terminal."))}><Copy />Copy</Button>
+          </div>
+        )}
+        <Button variant="link" size="xs" className="h-auto px-0 text-muted-foreground" onClick={copySkill}>Another agent? Copy the skill to paste into its instructions</Button>
+      </CardContent>
+    </Card>
+  )
+}
+
 function Palette({ open, setOpen, tasks, lists, tags, layout, run }: {
   open: boolean; setOpen: (b: boolean) => void; tasks: Task[]; lists: List[]; tags: string[]; layout: Layout
   run: { newTask: () => void; newNote: () => void; go: (v: View) => void; open: (t: Task) => void; setLayout: (l: Layout) => void; intro: () => void; update: () => void }
@@ -1493,7 +1525,7 @@ function Detail({ task, ctx, thread, live, isRunning, where, close, reply, stop 
   const latest = useRef(task)
   latest.current = task
   const [pick, setPick] = useState<Pick>(noPick)
-  const [answer, setAnswer] = useState("")
+  const [answer, setAnswer] = useDraft(`orlo.draft.reply.${task.id}`)
   // Braced body: WebView2's scrollIntoView returns a Promise, which React would treat as a cleanup function.
   useEffect(() => { end.current?.scrollIntoView({ block: "end" }) }, [thread.length, live])
   const isTask = task.kind === "task"

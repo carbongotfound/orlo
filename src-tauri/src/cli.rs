@@ -99,10 +99,21 @@ fn append(id: Option<i64>, text: Option<&String>) -> Result<String, String> {
     Ok(format!("#{id} updated"))
 }
 
+/// How to call this executable from a shell: `orlo` once Orlo's PATH shim points here (Windows), else the full path.
+pub fn exe() -> String {
+    let exe = env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "orlo".into());
+    #[cfg(windows)]
+    if let Some(l) = env::var_os("LOCALAPPDATA") {
+        if std::fs::read_to_string(PathBuf::from(l).join("Orlo").join("bin").join("orlo.cmd")).is_ok_and(|s| s.contains(&format!("\"{exe}\""))) {
+            return "orlo".into();
+        }
+    }
+    if exe.contains(' ') { format!("\"{exe}\"") } else { exe }
+}
+
 /// A skill file for Claude Code (~/.claude/skills/orlo/SKILL.md) and the like; also works pasted into any agent's instructions.
 pub fn skill() -> String {
-    let exe = env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "orlo".into());
-    let exe = if exe.contains(' ') { format!("\"{exe}\"") } else { exe };
+    let exe = exe();
     format!(r#"---
 name: orlo
 description: Read, add and check off the user's Orlo tasks and notes. Use when the user mentions Orlo, their to-do list, tasks or notes, asks what to work on next, or when you finish, discover or leave behind work worth tracking.
