@@ -13,8 +13,9 @@ import { toast } from "sonner"
 import { cn } from "cn"
 import { Toaster } from "@/components/ui/sonner"
 import { AgentIcon } from "@/components/agent-icon"
-import { CodeView } from "@/components/code-view"
-import { MdEditor, MdView, plain } from "@/components/md-editor"
+import { CodeWorkspace } from "@/components/code-view"
+import { ACCESS, EFFORTS, MAC, MOD, MODELS, noPick, type Pick } from "@/agents"
+import { firstImage, mediaSrc, MdEditor, MdView, plain } from "@/components/md-editor"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Calendar } from "@/components/ui/calendar"
@@ -53,13 +54,12 @@ type List = { id: number; name: string }
 type Task = {
   id: number; title: string; notes: string; due: string | null; list_id: number | null; status: string
   agent: string | null; session_id: string | null; tags: string; kind: string; model: string; effort: string; verdict: string
-  cwd: string | null
+  cwd: string | null; access: string
 }
 type Ev = { task_id: number; kind: string; text: string }
 type Cli = { name: string; path: string | null; cap: string }
 type Mode = "task" | "note"
 type Layout = "list" | "board"
-type Pick = { agent: string; model: string; effort: string }
 type View = "home" | "tasks" | "notes" | "code" | number | `#${string}`
 type Notif = { id: number; task_id: number | null; title: string; text: string; tone: Tone; at: number; read: boolean }
 type Tone = "work" | "review" | "warn" | "done" | "idle"
@@ -74,6 +74,17 @@ const win = getCurrentWindow()
 const ymd = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
 const today = () => ymd(new Date())
 const inDays = (n: number) => ymd(new Date(Date.now() + n * 864e5))
+// A date at the end of a new task's title: "Call mom tomorrow", "Ship it friday", "Pay rent in 3 days".
+const DAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"]
+function smartDue(text: string, now = new Date()): [string, string | null] {
+  const m = /\s+(?:by |on |due )?(today|tonight|tomorrow|tmrw|next week|in (\d{1,3}) (day|week)s?|(?:next )?(sun|mon|tue|wed|thu|fri|sat)[a-z]*)$/i.exec(text)
+  if (!m || !m.index) return [text, null]
+  const w = m[1].toLowerCase(), day = (n: number) => ymd(new Date(now.getFullYear(), now.getMonth(), now.getDate() + n))
+  const d = w === "today" || w === "tonight" ? day(0) : w === "tomorrow" || w === "tmrw" ? day(1) : w === "next week" ? day(7)
+    : m[2] ? day(Number(m[2]) * (m[3].toLowerCase() === "week" ? 7 : 1))
+    : day(((DAYS.indexOf(m[4].toLowerCase()) - now.getDay() + 7) % 7 || 7) + (w.startsWith("next ") ? 7 : 0))
+  return [text.slice(0, m.index), d]
+}
 const title = (s: string) => s ? s[0].toUpperCase() + s.slice(1) : s
 const typing = (t: EventTarget | null) => t instanceof HTMLElement && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))
 // Tags live in one comma-separated column.
@@ -88,15 +99,7 @@ const autoDot = (g: string) => `oklch(0.72 0.14 ${hue(g)})`
 let tagColors: Record<string, string> = {}
 const dot = (g: string) => tagColors[g] ?? autoDot(g)
 const SWATCHES = ["#ef4444", "#f97316", "#eab308", "#22c55e", "#14b8a6", "#3b82f6", "#8b5cf6", "#ec4899", "#94a3b8"]
-const MAC = navigator.userAgent.includes("Mac")
 const TEMPLATE_TAGS = ["Work", "Personal", "Urgent", "Errand", "Idea"]
-// Model names each CLI accepts; "default" leaves the CLI's own choice.
-const MODELS: Record<string, string[]> = {
-  claude: ["fable", "opus", "sonnet", "haiku"],
-  codex: ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra", "gpt-6-luna", "gpt-5.5"],
-}
-const EFFORTS: Record<string, string[]> = { claude: ["low", "medium", "high", "xhigh", "max"], codex: ["low", "medium", "high", "xhigh"] }
-const noPick: Pick = { agent: "", model: "", effort: "" }
 // Each fires once, the first time it happens.
 const MILESTONES: Record<string, Party> = {
   "first-task": { title: "Yay! You made your first task!", text: "Orlo's got it. Press Space to check it off, or hand it to an agent." },
@@ -180,12 +183,16 @@ export default function App() {
   const tasksRef = useRef(tasks)
   tasksRef.current = tasks
   const mode: Mode = view === "notes" ? "note" : "task"
-  const [codeRoot, setCodeRoot] = useState<string | null>(() => store.get("orlo.codeRoot", null))
-  const [tick, setTick] = useState(0)
-  useEffect(() => store.set("orlo.codeRoot", codeRoot), [codeRoot])
+  // Code view conversations are rows too (kind "chat"), kept out of every task list.
+  const [chats, setChats] = useState<Task[]>([])
+  const chatsRef = useRef(chats)
+  chatsRef.current = chats
+  const [focusChat, setFocusChat] = useState<{ cwd: string; id: number; n: number } | null>(null)
 
   const refresh = async () => {
-    setTasks((await call<Task[]>("tasks")) ?? [])
+    const all = (await call<Task[]>("tasks")) ?? []
+    setTasks(all.filter((t) => t.kind !== "chat"))
+    setChats(all.filter((t) => t.kind === "chat"))
     setRunning((await call<number[]>("running")) ?? [])
   }
   const loadLists = async () => setLists((await call<List[]>("lists")) ?? [])
@@ -210,10 +217,10 @@ export default function App() {
     const every = import.meta.env.DEV ? 0 : window.setInterval(() => checkUpdate(false), 6 * 3600_000)
     const un = listen<Ev>("agent", ({ payload: ev }) => {
       if (["prompt", "reply", "end", "verdict"].includes(ev.kind)) refresh()
-      if (ev.kind === "end") setTick((n) => n + 1)
-      const name = tasksRef.current.find((t) => t.id === ev.task_id)?.title ?? "Task"
+      const chat = chatsRef.current.find((t) => t.id === ev.task_id)
+      const name = chat ? `Code · ${chat.title}` : tasksRef.current.find((t) => t.id === ev.task_id)?.title ?? "Task"
       if (ev.kind === "verdict") {
-        const text = ev.text === "complete" ? "Finished and checked it off" : ev.text === "input" ? "Has a question for you" : "Finished — ready for your review"
+        const text = ev.text === "complete" ? (chat ? "Finished" : "Finished and checked it off") : ev.text === "input" ? "Has a question for you" : "Finished — ready for your review"
         notify({ task_id: ev.task_id, title: name, text, tone: ev.text === "complete" ? "done" : ev.text === "input" ? "warn" : "review" })
       }
       if (ev.kind === "end" && /code [1-9]/.test(ev.text)) notify({ task_id: ev.task_id, title: name, text: `Stopped · ${ev.text}`, tone: "warn" })
@@ -337,7 +344,8 @@ export default function App() {
   // "#tag" words in the title become tags too.
   const addTask = async (text: string, picked: string[], agent: Pick, kind: Mode, due: string | null) => {
     const inline = [...text.matchAll(/(?:^|\s)#([\p{L}\p{N}_-]+)/gu)].map((m) => m[1])
-    const clean = text.replace(/(?:^|\s)#[\p{L}\p{N}_-]+/gu, "").trim() || text
+    let clean = text.replace(/(?:^|\s)#[\p{L}\p{N}_-]+/gu, "").trim() || text
+    if (kind === "task" && !due) [clean, due] = smartDue(clean)
     const fromView = typeof view === "string" && view[0] === "#" ? [view.slice(1)] : []
     const tags = [...new Set([...fromView, ...picked, ...inline])]
     const t = await call<Task>("add_task", {
@@ -409,19 +417,13 @@ export default function App() {
   const ctx: Ctx = { clis, lists, tags: allTags, running, sel, open: openTask, toggle, save, remove, delegate, fresh }
   const unread = notifs.filter((n) => !n.read).length
   const showBoard = mode === "task" && layout === "board" && !home && !code
-  // The Code view's ask box: a task that runs in the open project folder, followed in the side panel like any other.
-  const askInCode = async (prompt: string, agent: string) => {
-    const line = prompt.split("\n")[0]
-    const t = await call<Task>("add_task", { title: line, kind: "task", listId: null, due: null, cwd: codeRoot })
-    if (!t) return
-    // The run prompt is title + notes, so notes carry only what the title doesn't.
-    t.notes = prompt.slice(line.length).trim()
-    if (t.notes) await call("save_task", { task: t })
-    setTasks((ts) => [...ts, t])
-    delegate(t, { ...noPick, agent })
-  }
   const composer = <Composer key={mode} kind={mode} clis={clis} tags={allTags} inputRef={newRef} onAdd={addTask} />
-  const openById = (id: number) => { const t = tasks.find((x) => x.id === id); if (t) openTask(t) }
+  const openById = (id: number) => {
+    const c = chats.find((x) => x.id === id)
+    if (c?.cwd) { go("code"); setFocusChat({ cwd: c.cwd, id, n: Date.now() }); return }
+    const t = tasks.find((x) => x.id === id)
+    if (t) openTask(t)
+  }
 
   return (
     <TooltipProvider delay={300}>
@@ -453,7 +455,11 @@ export default function App() {
           <div className="flex min-h-0 flex-1">
             {/* Stays mounted while you visit other views, so open tabs and unsaved edits survive. */}
             <div className={cn("min-w-0 flex-1 overflow-hidden", !code && "hidden")}>
-              <CodeView root={codeRoot} setRoot={setCodeRoot} clis={clis} onAsk={askInCode} tick={tick} />
+              <CodeWorkspace
+                visible={code} clis={clis} chats={chats} running={running} refresh={refresh} focus={focusChat}
+                activity={(ev, agent) => <Activity ev={ev} agent={agent} />}
+                picker={(v, set) => <AgentPick clis={clis} v={v} set={set} required />}
+              />
             </div>
             <main key={`${String(view)}-${layout}`} className={cn("@container/main orlo-enter min-w-0 flex-1 overflow-y-auto", code && "hidden")}>
               {home ? (
@@ -624,7 +630,7 @@ function AppSidebar(p: {
                   className="min-w-8 bg-primary text-primary-foreground duration-200 ease-linear hover:bg-primary/90 hover:text-primary-foreground active:bg-primary/90 active:text-primary-foreground">
                   <Plus /><span>New task</span>
                 </SidebarMenuButton>
-                <Tip label={<>Command menu <Kbd>Ctrl K</Kbd></>}>
+                <Tip label={<>Command menu <Kbd>{MOD}K</Kbd></>}>
                   <Button size="icon" variant="outline" className="size-8 shrink-0 group-data-[collapsible=icon]:opacity-0" onClick={p.openPalette} aria-label="Command menu">
                     <Search />
                   </Button>
@@ -855,15 +861,17 @@ function Choice({ value, options, onChange, icon, className }: {
   )
 }
 
-// CLI, model and reasoning for a delegation. Grok's model flags aren't known, so it only gets the CLI choice.
-function AgentPick({ clis, v, set }: { clis: Cli[]; v: Pick; set: (p: Pick) => void }) {
+// CLI, model, reasoning and access for a run; each list only offers what that CLI supports.
+function AgentPick({ clis, v, set, required }: { clis: Cli[]; v: Pick; set: (p: Pick) => void; required?: boolean }) {
   const models = MODELS[v.agent] ?? []
+  const access = ACCESS[v.agent] ?? []
+  const agents = clis.map((c): [string, React.ReactNode, boolean] => [c.name, <><AgentIcon name={c.name} />{title(c.name)}{required ? "" : " Agent"}</>, !c.path])
   return (
     <>
       <Choice
         value={v.agent || "none"} icon={v.agent ? undefined : <Bot />}
         onChange={(a) => set(a === "none" ? noPick : { ...noPick, agent: a })}
-        options={[["none", "No agent"], ...clis.map((c): [string, React.ReactNode, boolean] => [c.name, <><AgentIcon name={c.name} />{title(c.name)} Agent</>, !c.path])]}
+        options={required ? agents : [["none", "No agent"], ...agents]}
       />
       {models.length > 0 && <>
         <Choice value={v.model || "default"} onChange={(m) => set({ ...v, model: m === "default" ? "" : m })}
@@ -871,6 +879,10 @@ function AgentPick({ clis, v, set }: { clis: Cli[]; v: Pick; set: (p: Pick) => v
         <Choice value={v.effort || "default"} onChange={(x) => set({ ...v, effort: x === "default" ? "" : x })}
           options={[["default", "Default reasoning"], ...EFFORTS[v.agent].map((x): [string, string] => [x, `${title(x)} reasoning`])]} />
       </>}
+      {access.length > 1 && (
+        <Choice value={v.access || "default"} onChange={(x) => set({ ...v, access: x === "default" ? "" : x })}
+          options={access.map(([val, label]): [string, string] => [val || "default", label])} />
+      )}
     </>
   )
 }
@@ -963,7 +975,7 @@ function Composer({ kind, clis, tags, inputRef, onAdd }: {
     <InputGroup className="h-auto bg-card! shadow-xs">
       <InputGroupInput
         ref={inputRef} value={text} onChange={(e) => setText(e.target.value)}
-        placeholder={kind === "note" ? "New note title…" : "Add a task… (type #tag to tag it)"}
+        placeholder={kind === "note" ? "New note title…" : "Add a task… (#tag to tag it, \"tomorrow\" or \"friday\" to date it)"}
         className="h-11 px-3.5 text-sm"
         onKeyDown={(e) => { if (e.key === "Enter") submit(); if (e.key === "Escape") e.currentTarget.blur() }}
       />
@@ -1120,12 +1132,16 @@ function TaskCard({ t, ctx }: { t: Task; ctx: Ctx }) {
 }
 
 function NoteCard({ t, ctx }: { t: Task; ctx: Ctx }) {
+  const cover = firstImage(t.notes)
+  const [src, setSrc] = useState("")
+  useEffect(() => { if (cover && !/\.(mp4|webm|mov|m4v|ogv)$/i.test(cover)) mediaSrc(cover).then(setSrc); else setSrc("") }, [cover])
   return (
     <TaskMenu t={t} ctx={ctx} className={cn("block cursor-default rounded-xl outline-none data-selected:*:ring-ring", ctx.fresh === t.id && "orlo-enter")}>
-      <Card className="h-44 transition-shadow hover:ring-foreground/20">
+      <Card className="h-44 overflow-hidden transition-shadow hover:ring-foreground/20">
+        {src && <img src={src} alt="" className="-mt-4 h-20 w-full shrink-0 object-cover" draggable={false} />}
         <CardHeader>
           <CardTitle className="truncate">{t.title}</CardTitle>
-          <CardDescription className="line-clamp-4 whitespace-pre-wrap">{plain(t.notes) || "Empty note"}</CardDescription>
+          <CardDescription className={cn("whitespace-pre-wrap", src ? "line-clamp-1" : "line-clamp-4")}>{plain(t.notes) || "Empty note"}</CardDescription>
         </CardHeader>
         {t.tags && <CardContent className="mt-auto flex flex-wrap gap-1">{tagList(t.tags).map((g) => <TagBadge key={g} tag={g} />)}</CardContent>}
       </Card>
@@ -1369,11 +1385,15 @@ async function checkUpdate(manual: boolean) {
 }
 
 // Agents outside Orlo read tasks through the app's own exe: `orlo tasks`, `orlo show <id>`, `orlo done <id>`.
-async function copyCli() {
-  const exe = await call<string>("cli_path")
-  if (!exe) return
-  await navigator.clipboard.writeText(`"${exe}" tasks`)
-  toast.success("Copied the Orlo CLI command", { description: "Agents can run it to list tasks. Use show <id> for one task, done <id> to check it off, --json for JSON." })
+// The SKILL.md that `orlo skill` prints: paste it into any agent's instructions, or save it as a skill.
+async function copySkill() {
+  const text = await call<string>("agent_skill")
+  if (!text) return
+  await navigator.clipboard.writeText(text)
+  toast.success("Copied the Orlo skill for AI agents", {
+    description: "Paste it into your agent's instructions, or save it as ~/.claude/skills/orlo/SKILL.md for Claude Code. Agents can then list, add and check off your tasks.",
+    duration: 9000,
+  })
 }
 
 function Palette({ open, setOpen, tasks, lists, tags, layout, run }: {
@@ -1418,7 +1438,7 @@ function Palette({ open, setOpen, tasks, lists, tags, layout, run }: {
           <CommandGroup heading="Help">
             <CommandItem onSelect={act(run.intro)}><Sparkles />Show the Orlo introduction</CommandItem>
             <CommandItem onSelect={act(run.update)}><Download />Check for updates</CommandItem>
-            <CommandItem value="copy agent cli command orlo tasks terminal" onSelect={act(copyCli)}><Copy />Copy CLI command for agents</CommandItem>
+            <CommandItem value="copy orlo skill prompt instructions for ai agents cli command terminal" onSelect={act(copySkill)}><Copy />Copy Orlo skill for AI agents</CommandItem>
           </CommandGroup>
           <CommandGroup heading="View">
             <CommandItem onSelect={act(() => run.setLayout(layout === "list" ? "board" : "list"))}>
