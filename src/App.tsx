@@ -7,7 +7,7 @@ import { isPermissionGranted, requestPermission, sendNotification } from "@tauri
 import {
   ArrowUpRight, Bell, Bot, CalendarDays, Check, CircleCheck, Columns3, Copy, CornerDownLeft, Download, Ellipsis, FileText, Hash,
   CodeXml, FolderOpen, LayoutDashboard, ListTodo, MessageSquareText, Minus, Pencil, Plus, Rows3, Search, Sparkles, Square, Star, Tag, Trash2,
-  TriangleAlert, Wrench, X,
+  Brain, Shield, TriangleAlert, Wrench, X,
 } from "lucide-react"
 import { toast } from "sonner"
 import { cn } from "cn"
@@ -458,7 +458,7 @@ export default function App() {
               <CodeWorkspace
                 visible={code} clis={clis} chats={chats} running={running} refresh={refresh} focus={focusChat}
                 activity={(ev, agent) => <Activity ev={ev} agent={agent} />}
-                picker={(v, set) => <AgentPick clis={clis} v={v} set={set} required />}
+                picker={(v, set) => <AgentPick clis={clis} v={v} set={set} required compact />}
               />
             </div>
             <main key={`${String(view)}-${layout}`} className={cn("@container/main orlo-enter min-w-0 flex-1 overflow-y-auto", code && "hidden")}>
@@ -862,25 +862,29 @@ function Choice({ value, options, onChange, icon, className }: {
 }
 
 // CLI, model, reasoning and access for a run; each list only offers what that CLI supports.
-function AgentPick({ clis, v, set, required }: { clis: Cli[]; v: Pick; set: (p: Pick) => void; required?: boolean }) {
+// `compact`: small pills for the Code view's chat box, with icons standing in for the words.
+function AgentPick({ clis, v, set, required, compact }: { clis: Cli[]; v: Pick; set: (p: Pick) => void; required?: boolean; compact?: boolean }) {
   const models = MODELS[v.agent] ?? []
   const access = ACCESS[v.agent] ?? []
   const agents = clis.map((c): [string, React.ReactNode, boolean] => [c.name, <><AgentIcon name={c.name} />{title(c.name)}{required ? "" : " Agent"}</>, !c.path])
+  const pill = compact ? "h-6 gap-1 rounded-md px-1.5 text-xs text-muted-foreground hover:text-foreground [&_svg]:size-3.5" : undefined
   return (
     <>
       <Choice
-        value={v.agent || "none"} icon={v.agent ? undefined : <Bot />}
+        value={v.agent || "none"} icon={v.agent ? undefined : <Bot />} className={cn(pill, compact && "text-foreground")}
         onChange={(a) => set(a === "none" ? noPick : { ...noPick, agent: a })}
         options={required ? agents : [["none", "No agent"], ...agents]}
       />
       {models.length > 0 && <>
-        <Choice value={v.model || "default"} onChange={(m) => set({ ...v, model: m === "default" ? "" : m })}
-          options={[["default", "Default model"], ...models.map((m): [string, string] => [m, m])]} />
-        <Choice value={v.effort || "default"} onChange={(x) => set({ ...v, effort: x === "default" ? "" : x })}
-          options={[["default", "Default reasoning"], ...EFFORTS[v.agent].map((x): [string, string] => [x, `${title(x)} reasoning`])]} />
+        <Choice value={v.model || "default"} onChange={(m) => set({ ...v, model: m === "default" ? "" : m })} className={pill}
+          options={[["default", compact ? "Default" : "Default model"], ...models.map((m): [string, string] => [m, m])]} />
+        <Choice value={v.effort || "default"} onChange={(x) => set({ ...v, effort: x === "default" ? "" : x })} className={pill}
+          icon={compact ? <Brain /> : undefined}
+          options={[["default", compact ? "Auto" : "Default reasoning"], ...EFFORTS[v.agent].map((x): [string, string] => [x, compact ? title(x) : `${title(x)} reasoning`])]} />
       </>}
       {access.length > 1 && (
-        <Choice value={v.access || "default"} onChange={(x) => set({ ...v, access: x === "default" ? "" : x })}
+        <Choice value={v.access || "default"} onChange={(x) => set({ ...v, access: x === "default" ? "" : x })} className={pill}
+          icon={compact ? <Shield /> : undefined}
           options={access.map(([val, label]): [string, string] => [val || "default", label])} />
       )}
     </>
@@ -1346,7 +1350,7 @@ function Bells({ notifs, unread, setNotifs, openTask }: {
 }
 
 // Updates come from GitHub releases. The check runs at launch, every 6 hours and from the palette;
-// "Update" downloads the new exe, checks its SHA-256 and restarts Orlo (install_update in lib.rs).
+// "Download" fetches the new exe, checks its SHA-256 and swaps it in (install_update in lib.rs); "Restart now" or the next launch runs it.
 const REPO = "carbongotfound/orlo"
 type Release = { tag_name: string; html_url: string; assets: { name: string; browser_download_url: string; digest?: string }[] }
 
@@ -1356,6 +1360,16 @@ const newer = (a: string, b: string) => {
   return false
 }
 
+// The version already downloaded and swapped in; it runs from the next start.
+let staged = ""
+const readyToast = (v: string) => toast.success(`Orlo ${v} is ready`, {
+  id: "update",
+  duration: Infinity,
+  closeButton: true,
+  description: "Restart now to use it (running agents stop), or it starts the next time you open Orlo.",
+  action: { label: "Restart now", onClick: () => void invoke("restart") },
+})
+
 async function checkUpdate(manual: boolean) {
   try {
     const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`)
@@ -1364,18 +1378,22 @@ async function checkUpdate(manual: boolean) {
     const [v, mine] = [r.tag_name.replace(/^v/, ""), await getVersion()]
     if (!newer(v, mine)) return void (manual && toast.success(`Orlo ${mine} is the latest version`))
     // The in-place swap is for the Windows exe; on a Mac the toast points at the release instead.
+    if (staged === v) return void (manual && readyToast(v))
     const exe = MAC ? undefined : r.assets.find((a) => a.name === `Orlo-${v}-windows-x64.exe`)
     toast(`Orlo ${v} is available`, {
       id: "update",
       duration: Infinity,
       closeButton: true,
-      description: exe?.digest ? `You have ${mine}. Updating restarts Orlo and stops running agents.` : `Download it from github.com/${REPO}/releases`,
+      description: exe?.digest ? `You have ${mine}. Download it now; it's set up when you restart Orlo.` : `Download it from github.com/${REPO}/releases`,
       action: exe?.digest ? {
-        label: "Update",
+        label: "Download",
         onClick: async () => {
-          toast.loading(`Downloading Orlo ${v}…`, { id: "update", duration: Infinity, description: undefined })
-          try { await invoke("install_update", { url: exe.browser_download_url, sha256: exe.digest }) }
-          catch (e) { toast.error("Update failed", { id: "update", duration: 8000, description: String(e) }) }
+          toast.loading(`Downloading Orlo ${v}…`, { id: "update", duration: Infinity, description: undefined, closeButton: false })
+          try {
+            await invoke("install_update", { url: exe.browser_download_url, sha256: exe.digest })
+            staged = v
+            readyToast(v)
+          } catch (e) { toast.error("Update failed", { id: "update", duration: 8000, description: String(e) }) }
         },
       } : undefined,
     })

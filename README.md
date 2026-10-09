@@ -30,13 +30,13 @@ Write a task, hand it to Claude Code, Codex, Grok, Hermes or Gemini, then review
   - Copying always gives you the raw Markdown.
   - **Images and videos:** paste, drop or pick them with the image button. They show inline in notes and task descriptions, and the first image becomes the note's cover.
 - **Code:** a small editor for your projects, with an agent beside it.
-  - **Several projects** open at once as tabs along the top; each keeps its own files, terminal and conversation.
+  - **Several projects** open at once as tabs along the top; each keeps its own files, terminal and conversation. Recent folders are one click away, and you can drag the borders between the panels to resize them.
   - **Editor:** syntax highlighting, find and replace, multiple cursors, folding, bracket matching and word completion. <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>P</kbd> jumps to any file.
   - **Files:** right-click to create, rename, delete, copy a path or mention a file in the chat.
   - **Run** (<kbd>F5</kbd>) saves the open file and runs it in the terminal: Python, Node, TypeScript (via `tsx`), shell, PowerShell, Go, Ruby and more.
   - **Terminal** (<kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>J</kbd>) runs one command at a time in the project folder. It isn't interactive, so commands that wait for input won't work.
   - **Changes:** for a git project, see every file changed since the last commit, read the diff and discard what you don't want. Handy right after an agent run.
-  - **Agent chat** (<kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>L</kbd> opens and closes it): talk to Claude, Codex, Grok, Hermes or Gemini about the project. Pick the model, reasoning effort and access level each agent supports. Conversations stay with the project and never show up as tasks. Replies continue the same session.
+  - **Agent chat** (<kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>L</kbd> opens and closes it; with code selected, it quotes the selection with its file and line numbers): talk to Claude, Codex, Grok, Hermes or Gemini about the project. Pick the model, reasoning effort and access level each agent supports. Conversations stay with the project and never show up as tasks. Replies continue the same session.
   - **Slash commands:** `/clear` starts a new conversation, `/model`, `/effort` and `/access` switch settings, `/stop` stops the run. The agent's own commands are listed too: Claude reports its commands (such as `/compact`) and Grok its own (`/compact`, `/context`, `/review` and more). `@` mentions a file.
 - **Agents in the sidebar:** click one to see every task it has completed.
 - **Notifications:** a bell inside the app plus a system notification with sound when an agent finishes, needs your review or needs an answer, and reminders for tasks that are overdue, due today or due tomorrow (while Orlo is open).
@@ -61,7 +61,7 @@ Write a task, hand it to Claude Code, Codex, Grok, Hermes or Gemini, then review
    - **macOS** may say Orlo "can't be opened" or "is damaged". Run `xattr -dr com.apple.quarantine /Applications/Orlo.app` once in Terminal, then open it.
    - Or build it yourself from source (see below).
 
-**Updates:** Orlo checks GitHub for a new release at launch and every 6 hours, or when you pick **Check for updates** in the command menu (<kbd>Ctrl</kbd>+<kbd>K</kbd>). On Windows, click **Update** and it downloads the new exe, checks it against the SHA-256 that GitHub publishes for the release, swaps it in and restarts. On a Mac it tells you a new version is out, and you download the new dmg from Releases. Your data is untouched either way.
+**Updates:** Orlo checks GitHub for a new release at launch and every 6 hours, or when you pick **Check for updates** in the command menu (<kbd>Ctrl</kbd>+<kbd>K</kbd>). On Windows, click **Download** and it downloads the new exe, checks it against the SHA-256 that GitHub publishes for the release and sets it up. Then pick **Restart now**, or carry on and the new version starts the next time you open Orlo. On a Mac it tells you a new version is out, and you download the new dmg from Releases. Your data is untouched either way.
 
 **Requirements:**
 - Windows 10 or 11 (x64) with the [WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/). It's preinstalled on Windows 11.
