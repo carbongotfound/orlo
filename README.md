@@ -1,20 +1,20 @@
 <div align="center">
 
-<img src="public/mascot.png" width="120" alt="Orlo mascot" />
-
 # Orlo
 
-**Tasks, notes and AI agents in one calm app for Windows and macOS.**
+**A to-do list your coding agent works through.**
 
-Write a task, hand it to Claude Code, Codex, Grok, Hermes or Gemini, then review and approve the result, all from your to-do list.
+Write a task, hand it to Claude Code or Grok, and it comes back **done**, **needs review**, or **needs input**.<br/>Reply to push it further. Approve to check it off.
 
-[Download for Windows or Mac](https://github.com/carbongotfound/orlo/releases/latest) · [Report a bug](https://github.com/carbongotfound/orlo/issues/new?template=bug_report.md) · [Contributing](CONTRIBUTING.md)
+Free and open source · runs locally · no account · Windows and macOS
+
+<a href="https://github.com/carbongotfound/orlo/releases/download/v1.1.0/Orlo-launch-film.mp4"><img src="docs/launch-film.webp" alt="Orlo demo: a task goes to an agent and comes back for review" width="860" /></a>
+
+### [Download Orlo](https://github.com/carbongotfound/orlo/releases/latest)
+
+[Watch the demo with sound](https://github.com/carbongotfound/orlo/releases/download/v1.1.0/Orlo-launch-film.mp4) · [Report a bug](https://github.com/carbongotfound/orlo/issues/new?template=bug_report.md) · [Contributing](CONTRIBUTING.md)
 
 <img src="docs/screenshots/home.png" alt="Orlo home screen" width="860" />
-
-<a href="https://github.com/carbongotfound/orlo/releases/download/v1.1.0/Orlo-launch-film.mp4"><img src="docs/launch-film.webp" alt="Orlo launch film" width="860" /></a>
-
-🔊 **[Watch with sound](https://github.com/carbongotfound/orlo/releases/download/v1.1.0/Orlo-launch-film.mp4)**
 
 </div>
 
@@ -82,6 +82,9 @@ The agent list at the bottom of the sidebar shows which CLIs Orlo found. On a Ma
 
 ## How Orlo works with agent CLIs
 
+<details>
+<summary>Safety, permissions and provider terms (click to expand)</summary>
+
 Orlo is an independent project. It is **not affiliated with, endorsed by or sponsored by Anthropic, OpenAI, xAI, Nous Research or Google.** It was designed to stay inside each provider's rules.
 
 - **It only launches the official CLI you installed,** as you, on your own machine. That's the same as typing the command in a terminal. Each run gets its own folder, `~/Orlo/<task-id>` (`%USERPROFILE%\Orlo\<task-id>` on Windows), which you can change with `ORLO_WORK`.
@@ -113,6 +116,9 @@ Pick the access level next to the model. Each agent offers only the levels its C
 - **Every run** is stopped after 20 minutes. Stop ends it straight away, and closing Orlo ends any agent still running.
 
 Claude, Codex, Grok, Hermes and Gemini names and logos are trademarks of their owners. They appear here only to show which tool a task uses. The logo artwork comes from [@lobehub/icons](https://github.com/lobehub/lobe-icons) (MIT).
+
+
+</details>
 
 ## Keyboard
 
