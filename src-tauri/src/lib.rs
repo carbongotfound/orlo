@@ -838,8 +838,10 @@ fn is_release_url(url: &str) -> bool {
     url.starts_with(RELEASES) && url.ends_with(".exe") && !url.contains("..") && !url.contains(['?', '#', '\\'])
 }
 
+/// Downloads the new exe, checks it and swaps it in place of the running one (Windows lets a running exe be renamed).
+/// Nothing restarts: the new version runs from the next launch, or right away via `restart`.
 #[tauri::command]
-async fn install_update(app: AppHandle, url: String, sha256: String) -> Result<(), String> {
+async fn install_update(url: String, sha256: String) -> Result<(), String> {
     use sha2::{Digest, Sha256};
     if !cfg!(windows) { return Err("In-app updates are for the Windows exe. Download the new version from GitHub Releases.".into()) }
     if !is_release_url(&url) { return Err("Not an Orlo release download".into()) }
@@ -864,7 +866,13 @@ async fn install_update(app: AppHandle, url: String, sha256: String) -> Result<(
         let _ = fs::rename(&old, &exe);
         return Err(e(x));
     }
-    Command::new(&exe).spawn().map_err(e)?;
+    Ok(())
+}
+
+/// Starts the exe (the updated one, after install_update) and quits this copy.
+#[tauri::command]
+fn restart(app: AppHandle) -> Result<(), String> {
+    Command::new(std::env::current_exe().map_err(e)?).env("ORLO_RESTARTED", "1").spawn().map_err(e)?;
     app.exit(0);
     Ok(())
 }
@@ -919,6 +927,12 @@ pub fn run() {
     if let Some(code) = cli::main() {
         std::process::exit(code);
     }
+    // Started by `restart`: give the old copy time to quit, or single-instance would hand off to it and leave nothing open.
+    // ponytail: fixed wait, poll the old pid if a slow machine ever needs longer.
+    if std::env::var_os("ORLO_RESTARTED").is_some() {
+        std::env::remove_var("ORLO_RESTARTED");
+        thread::sleep(Duration::from_millis(1500));
+    }
     #[cfg(target_os = "macos")]
     shell_path();
     tauri::Builder::default()
@@ -961,7 +975,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            lists, add_list, rename_list, delete_list, tag_colors, set_tag_color, rename_tag, agent_skill, list_dir, list_files, read_text, write_text, make_dir, rename_path, delete_path, run_cmd, stop_cmd, tasks, add_task, save_task, delete_task, events, clis, running, delegate, reply, stop, install_update, attachments_dir, attach, git
+            lists, add_list, rename_list, delete_list, tag_colors, set_tag_color, rename_tag, agent_skill, list_dir, list_files, read_text, write_text, make_dir, rename_path, delete_path, run_cmd, stop_cmd, tasks, add_task, save_task, delete_task, events, clis, running, delegate, reply, stop, install_update, restart, attachments_dir, attach, git
         ])
         .build(tauri::generate_context!())
         .expect("error while building orlo")

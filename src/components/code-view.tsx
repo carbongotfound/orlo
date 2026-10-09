@@ -17,8 +17,8 @@ import { autocompletion, closeBrackets, closeBracketsKeymap, completeAnyWord, co
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search"
 import { tags as t } from "@lezer/highlight"
 import {
-  ChevronRight, File, FilePlus, Folder, FolderOpen, FolderPlus, MessageSquarePlus, PanelBottom, PanelLeft, PanelRight,
-  Pencil, Play, Plus, RefreshCw, Search, Send, Square, SquareTerminal, Trash2, Undo2, X,
+  ArrowUp, ChevronRight, File, FilePlus, Folder, FolderOpen, FolderPlus, MessageSquarePlus, PanelBottom, PanelLeft, PanelRight,
+  Pencil, Play, Plus, RefreshCw, Search, Square, SquareTerminal, Trash2, Undo2, X,
 } from "lucide-react"
 import { toast } from "sonner"
 import { cn } from "cn"
@@ -97,7 +97,13 @@ export function CodeWorkspace({ visible, focus, ...shared }: Shared & { visible:
   useEffect(() => store.set("orlo.codeActive", active), [active])
   const current = active && projects.includes(active) ? active : projects[0] ?? null
 
-  const add = (dir: string) => { setProjects((ps) => (ps.includes(dir) ? ps : [...ps, dir])); setActive(dir) }
+  const [recent, setRecent] = useState<string[]>(() => store.get("orlo.codeRecent", []))
+  useEffect(() => store.set("orlo.codeRecent", recent), [recent])
+  const add = (dir: string) => {
+    setProjects((ps) => (ps.includes(dir) ? ps : [...ps, dir]))
+    setActive(dir)
+    setRecent((rs) => [dir, ...rs.filter((x) => x !== dir)].slice(0, 8))
+  }
   const choose = async () => {
     const dir = await pickFolder({ directory: true, title: "Open a project folder" })
     if (typeof dir === "string") add(dir)
@@ -117,7 +123,24 @@ export function CodeWorkspace({ visible, focus, ...shared }: Shared & { visible:
           <EmptyTitle>Code in Orlo</EmptyTitle>
           <EmptyDescription>Open a project folder to edit its files, run commands, and chat with any of your agents while they work on it.</EmptyDescription>
         </EmptyHeader>
-        <EmptyContent><Button size="sm" onClick={choose}><FolderOpen />Open folder</Button></EmptyContent>
+        <EmptyContent>
+          <Button size="sm" onClick={choose}><FolderOpen />Open folder</Button>
+          {recent.length > 0 && (
+            <div className="mt-4 flex w-full max-w-sm flex-col gap-0.5 text-left">
+              <span className="px-2 pb-1 text-xs font-medium text-muted-foreground">Recent</span>
+              {recent.map((d) => (
+                <div key={d} className="group flex items-center rounded-md hover:bg-muted">
+                  <button className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-sm" title={d} onClick={() => add(d)}>
+                    <Folder className="size-4 shrink-0 text-muted-foreground" /><span className="truncate">{base(d)}</span>
+                    <span className="truncate text-xs text-muted-foreground">{parent(d)}</span>
+                  </button>
+                  <button className="mr-1 grid size-5 shrink-0 place-items-center rounded opacity-0 group-hover:opacity-100 hover:bg-background" aria-label={`Forget ${base(d)}`}
+                    onClick={() => setRecent((rs) => rs.filter((x) => x !== d))}><X className="size-3" /></button>
+                </div>
+              ))}
+            </div>
+          )}
+        </EmptyContent>
       </Empty>
     )
   }
@@ -144,6 +167,26 @@ export function CodeWorkspace({ visible, focus, ...shared }: Shared & { visible:
           focusChat={focus?.cwd === p ? focus : null} />
       ))}
     </>
+  )
+}
+
+// Drag handle between panels; it is also the 1px border.
+function Grip({ dir, onDrag }: { dir: "x" | "y"; onDrag: (delta: number) => void }) {
+  return (
+    <div
+      role="separator" aria-orientation={dir === "x" ? "vertical" : "horizontal"}
+      className={cn("relative z-10 shrink-0 bg-border transition-colors hover:bg-ring/70 active:bg-ring",
+        dir === "x" ? "w-px cursor-col-resize after:absolute after:inset-y-0 after:-left-1.5 after:w-3" : "h-px cursor-row-resize after:absolute after:inset-x-0 after:-top-1.5 after:h-3")}
+      onPointerDown={(e) => {
+        e.preventDefault()
+        let last = dir === "x" ? e.clientX : e.clientY
+        const move = (ev: PointerEvent) => { const at = dir === "x" ? ev.clientX : ev.clientY; onDrag(at - last); last = at }
+        const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); document.body.style.cursor = "" }
+        document.body.style.cursor = dir === "x" ? "col-resize" : "row-resize"
+        window.addEventListener("pointermove", move)
+        window.addEventListener("pointerup", up)
+      }}
+    />
   )
 }
 
@@ -175,6 +218,10 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
   const [langs, setLangs] = useState<Record<string, string>>({})
   const [panels, setPanels] = useState(() => store.get("orlo.codePanels", { tree: true, term: false, chat: true }))
   useEffect(() => store.set("orlo.codePanels", panels), [panels])
+  const [sizes, setSizes] = useState(() => store.get("orlo.codeSizes", { tree: 224, chat: 360, term: 224 }))
+  useEffect(() => store.set("orlo.codeSizes", sizes), [sizes])
+  const resize = (k: keyof typeof sizes, d: number, min: number, max: number) =>
+    setSizes((z) => ({ ...z, [k]: Math.min(max, Math.max(min, z[k] + d)) }))
   const [quick, setQuick] = useState(false)
   const [files, setFiles] = useState<string[]>([])
 
@@ -217,6 +264,8 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
         EditorState.languageData.of(() => [{ autocomplete: completeAnyWord }]),
         keymap.of([
           { key: "Mod-s", preventDefault: true, run: () => { save(path); return true } },
+          // Ask about the selection (handled by the window listener), instead of CodeMirror's select-line.
+          { key: "Mod-l", run: () => true },
           ...closeBracketsKeymap, ...defaultKeymap, ...searchKeymap, ...historyKeymap, ...foldKeymap, ...completionKeymap, indentWithTab,
         ]),
         lang.of([]),
@@ -531,8 +580,18 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
       else if (k === "`" || k === "j") { e.preventDefault(); setPanels((p) => ({ ...p, term: !p.term })); requestAnimationFrame(() => termInput.current?.focus()) }
       else if (k === "l") {
         e.preventDefault()
-        // Toggles, except it first focuses an open chat that doesn't have focus yet.
-        if (panels.chat && document.activeElement !== box.current) box.current?.focus()
+        // With code selected, quotes it into the chat. Otherwise toggles, except it first focuses an open chat that doesn't have focus yet.
+        const v = view.current, sel = v?.state.selection.main
+        if (v && sel && !sel.empty && v.hasFocus && activeRef.current) {
+          // A selection ending at the start of a line doesn't include that line.
+          const to = v.state.doc.lineAt(sel.to).from === sel.to ? sel.to - 1 : sel.to
+          const a = v.state.doc.lineAt(sel.from).number, b = v.state.doc.lineAt(to).number
+          const where = `${rel(activeRef.current).split("\\").join("/")}:${a === b ? a : `${a}-${b}`}`
+          const quote = `@${where}\n\`\`\`\n${v.state.sliceDoc(sel.from, sel.to)}\n\`\`\`\n`
+          setPanels((p) => ({ ...p, chat: true }))
+          setPrompt((x) => (x.trim() ? `${x.trimEnd()}\n\n${quote}` : quote))
+          requestAnimationFrame(() => { const t = box.current; if (t) { t.focus(); t.setSelectionRange(t.value.length, t.value.length) } })
+        } else if (panels.chat && document.activeElement !== box.current) box.current?.focus()
         else { setPanels((p) => ({ ...p, chat: !p.chat })); requestAnimationFrame(() => box.current?.focus()) }
       }
     }
@@ -623,7 +682,7 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
 
       <div className="flex min-h-0 flex-1">
         {panels.tree && (
-          <aside className="flex w-[min(14rem,24%)] shrink-0 flex-col border-r">
+          <aside className="flex max-w-[35%] shrink-0 flex-col" style={{ width: sizes.tree }}>
             <div className="flex h-8 items-center gap-0.5 pr-1 pl-2">
               {(["files", "changes"] as const).map((k) => (
                 <button key={k} onClick={() => { setSide(k); if (k === "changes") loadChanges() }}
@@ -656,6 +715,7 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
           </aside>
         )}
 
+        {panels.tree && <Grip dir="x" onDrag={(d) => resize("tree", d, 140, 480)} />}
         <div className="flex min-w-0 flex-1 flex-col">
           <div className="flex h-9 shrink-0 items-stretch overflow-x-auto border-b">
             {tabs.map((p) => (
@@ -674,6 +734,15 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
               </Tip>
             )}
           </div>
+          {active && (
+            <div className="flex h-6 shrink-0 items-center gap-1 overflow-hidden px-3 text-[11px] text-muted-foreground">
+              {rel(active).split(/[\\/]/).map((part, i, all) => (
+                <span key={i} className={cn("flex shrink-0 items-center gap-1", i === all.length - 1 && "text-foreground")}>
+                  {i > 0 && <ChevronRight className="size-3" />}{part}
+                </span>
+              ))}
+            </div>
+          )}
           <div className="relative min-h-0 flex-1">
             <div ref={host} className={cn("orlo-code absolute inset-0", !active && "invisible")} />
             {diff && (
@@ -700,7 +769,7 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
                   <span>Save</span><Kbd>{MOD}S</Kbd>
                   <span>Find and replace</span><Kbd>{MOD}F</Kbd>
                   <span>Terminal</span><Kbd>{MOD}J</Kbd>
-                  <span>Agent chat</span><Kbd>{MOD}L</Kbd>
+                  <span>Agent chat (or ask about the selection)</span><Kbd>{MOD}L</Kbd>
                   <span>Run file</span><Kbd>F5</Kbd>
                 </div>
               </div>
@@ -708,7 +777,9 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
           </div>
 
           {panels.term && (
-            <div className="flex h-56 shrink-0 flex-col border-t">
+            <>
+            <Grip dir="y" onDrag={(d) => resize("term", -d, 96, 640)} />
+            <div className="flex max-h-[70%] shrink-0 flex-col" style={{ height: sizes.term }}>
               <div className="flex h-8 shrink-0 items-center gap-1 px-3 text-xs text-muted-foreground">
                 <SquareTerminal className="size-3.5" />Terminal
                 <span className="truncate font-mono text-[11px]">· {base(root)}</span>
@@ -736,13 +807,13 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
                 </div>
               </div>
             </div>
+            </>
           )}
 
-          <div className="flex h-6 shrink-0 items-center gap-3 border-t px-3 text-[11px] text-muted-foreground">
+          <div className="flex h-6 shrink-0 items-center gap-3 overflow-hidden border-t px-3 text-[11px] whitespace-nowrap text-muted-foreground">
             {active ? <>
               <span>Ln {cursor.line}, Col {cursor.col}{cursor.sel ? ` (${cursor.sel} selected)` : ""}</span>
               <span>{langs[active] ?? "Plain text"}</span>
-              <span>UTF-8</span>
               {dirty.includes(active) && <button className="text-foreground hover:underline" onClick={() => save(active)}>Unsaved · {MOD}S to save</button>}
             </> : <span className="truncate">{root}</span>}
             {busy && <span className="ml-auto flex items-center gap-1.5"><Spinner className="size-3" />{title(chat?.agent ?? "")} is working</span>}
@@ -750,7 +821,9 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
         </div>
 
         {panels.chat && (
-          <aside className="flex w-[min(24rem,36%)] shrink-0 flex-col border-l">
+          <>
+          <Grip dir="x" onDrag={(d) => resize("chat", -d, 280, 720)} />
+          <aside className="flex max-w-[50%] shrink-0 flex-col" style={{ width: sizes.chat }}>
             <div className="flex h-9 shrink-0 items-center gap-1 border-b px-2">
               <select
                 className="min-w-0 flex-1 truncate rounded-md bg-transparent px-1 py-1 text-xs font-medium outline-none hover:bg-muted"
@@ -782,8 +855,8 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
               )}
               <div ref={chatEnd} />
             </div>
-            <div className="shrink-0 border-t p-2">
-              <div className="relative rounded-lg border bg-background focus-within:ring-1 focus-within:ring-ring">
+            <div className="shrink-0 p-2 pt-0">
+              <div className="relative rounded-xl border bg-muted/30 shadow-xs transition-colors focus-within:border-ring/60 focus-within:bg-background">
                 {menu.length > 0 && (
                   <div className="absolute inset-x-0 bottom-full z-10 mb-1 max-h-64 overflow-y-auto rounded-lg border bg-popover p-1 shadow-md">
                     {menu.map(([ins, label, hint], i) => (
@@ -795,10 +868,10 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
                   </div>
                 )}
                 <textarea
-                  ref={box} value={prompt} rows={3} spellCheck autoCorrect="on" autoCapitalize="sentences"
+                  ref={box} value={prompt} rows={2} spellCheck autoCorrect="on" autoCapitalize="sentences"
                   disabled={!installed.length}
                   placeholder={!installed.length ? "Install an agent CLI (claude, codex, grok, hermes or gemini) to chat" : busy ? "Working… /stop to stop it" : chat ? "Reply…" : "Ask for a change…"}
-                  className="block max-h-48 min-h-16 w-full resize-none bg-transparent px-3 pt-2 text-sm outline-none placeholder:text-muted-foreground"
+                  className="block max-h-56 min-h-12 w-full resize-none bg-transparent px-3 pt-2.5 pb-1 text-sm leading-relaxed outline-none [field-sizing:content] placeholder:text-muted-foreground"
                   onChange={(e) => { setPrompt(e.target.value); setCaret(e.target.selectionStart) }}
                   onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
                   onKeyDown={(e) => {
@@ -810,17 +883,18 @@ function Project({ root, shown, visible, strip, clis, chats, running, refresh, a
                     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send() }
                   }}
                 />
-                <div className="flex flex-wrap items-center gap-1 px-1 pb-1">
-                  {picker(cur, setPick)}
+                <div className="flex items-end gap-1 px-1.5 pb-1.5">
+                  <div className="flex min-w-0 flex-1 flex-wrap items-center gap-0.5">{picker(cur, setPick)}</div>
                   {busy ? (
-                    <Button size="icon-sm" variant="secondary" className="ml-auto" aria-label="Stop" onClick={() => chat && call("stop", { taskId: chat.id })}><Square /></Button>
+                    <Tip label="Stop"><Button size="icon-sm" variant="secondary" className="shrink-0 rounded-full" aria-label="Stop" onClick={() => chat && call("stop", { taskId: chat.id })}><Square className="fill-current" /></Button></Tip>
                   ) : (
-                    <Button size="icon-sm" className="ml-auto" aria-label="Send" disabled={!prompt.trim() || !agent} onClick={send}><Send /></Button>
+                    <Tip label={<>Send <Kbd>Enter</Kbd></>}><Button size="icon-sm" className="shrink-0 rounded-full" aria-label="Send" disabled={!prompt.trim() || !agent} onClick={send}><ArrowUp /></Button></Tip>
                   )}
                 </div>
               </div>
             </div>
           </aside>
+          </>
         )}
       </div>
 
