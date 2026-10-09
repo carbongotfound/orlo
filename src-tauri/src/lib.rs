@@ -56,6 +56,14 @@ struct Task {
     /// How much the agent may do without asking; see access_args.
     #[serde(default)]
     access: String,
+    /// "claude:<session id>" when an agent added it from its own session (orlo add); delegating can continue that session.
+    #[serde(default)]
+    origin: Option<String>,
+    /// A note an agent wrote for this task id; `fresh` until someone opens it (the task shows READ THIS).
+    #[serde(default)]
+    for_task: Option<i64>,
+    #[serde(default)]
+    fresh: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -101,10 +109,10 @@ fn work_root() -> PathBuf {
 fn read_task(r: &rusqlite::Row) -> rusqlite::Result<Task> {
     Ok(Task {
         id: r.get(0)?, title: r.get(1)?, notes: r.get(2)?, due: r.get(3)?, list_id: r.get(4)?,
-        status: r.get(5)?, agent: r.get(6)?, session_id: r.get(7)?, tags: r.get(8)?, kind: r.get(9)?, model: r.get(10)?, effort: r.get(11)?, verdict: r.get(12)?, cwd: r.get(13)?, access: r.get(14)?,
+        status: r.get(5)?, agent: r.get(6)?, session_id: r.get(7)?, tags: r.get(8)?, kind: r.get(9)?, model: r.get(10)?, effort: r.get(11)?, verdict: r.get(12)?, cwd: r.get(13)?, access: r.get(14)?, origin: r.get(15)?, for_task: r.get(16)?, fresh: r.get(17)?,
     })
 }
-const TASK_COLS: &str = "id, title, notes, due, list_id, status, agent, session_id, tags, kind, model, effort, verdict, cwd, access";
+const TASK_COLS: &str = "id, title, notes, due, list_id, status, agent, session_id, tags, kind, model, effort, verdict, cwd, access, origin, for_task, fresh";
 
 #[tauri::command]
 fn lists(db: State<Db>) -> Result<Vec<List>, String> {
@@ -454,7 +462,7 @@ fn agent_skill() -> String {
 #[tauri::command]
 fn tasks(db: State<Db>) -> Result<Vec<Task>, String> {
     let c = db.0.lock().unwrap();
-    let mut s = c.prepare(&format!("SELECT {TASK_COLS} FROM tasks ORDER BY status='done', id")).map_err(e)?;
+    let mut s = c.prepare(&format!("SELECT {TASK_COLS} FROM tasks ORDER BY status!='open', id")).map_err(e)?;
     let r = s.query_map([], read_task).map_err(e)?.collect::<Result<_, _>>().map_err(e);
     r
 }
@@ -464,6 +472,12 @@ fn add_task(db: State<Db>, title: String, list_id: Option<i64>, due: Option<Stri
     let c = db.0.lock().unwrap();
     c.execute("INSERT INTO tasks(title, list_id, due, kind, cwd) VALUES (?1, ?2, ?3, ?4, ?5)", params![title, list_id, due, kind, cwd]).map_err(e)?;
     c.query_row(&format!("SELECT {TASK_COLS} FROM tasks WHERE id=?1"), [c.last_insert_rowid()], read_task).map_err(e)
+}
+
+/// The user opened an agent's note: the READ THIS on its task goes away.
+#[tauri::command]
+fn seen(db: State<Db>, id: i64) -> Result<(), String> {
+    db.0.lock().unwrap().execute("UPDATE tasks SET fresh=0 WHERE id=?1", [id]).map(|_| ()).map_err(e)
 }
 
 #[tauri::command]
@@ -533,10 +547,12 @@ fn attach(m: State<Media>, request: tauri::ipc::Request) -> Result<String, Strin
 }
 
 #[tauri::command]
-fn delegate(app: AppHandle, task_id: i64, agent: String, model: String, effort: String, access: Option<String>) -> Result<(), String> {
+/// `session` continues that CLI session (one this task came from, or another task's) instead of starting fresh.
+fn delegate(app: AppHandle, task_id: i64, agent: String, model: String, effort: String, access: Option<String>, session: Option<String>) -> Result<(), String> {
     let access = access.unwrap_or_default();
     access_args(&agent, &access)?;
-    if !plain(&model) || !plain(&effort) {
+    let session = session.filter(|s| !s.is_empty());
+    if !plain(&model) || !plain(&effort) || session.as_deref().is_some_and(|s| !plain(s)) {
         return Err("Model and reasoning may only use letters, digits, '.', '_' and '-'.".into());
     }
     let (title, notes, sid, linked): (String, String, Option<String>, String) = {
@@ -545,7 +561,7 @@ fn delegate(app: AppHandle, task_id: i64, agent: String, model: String, effort: 
         let (t, n, s): (String, String, Option<String>) = c
             .query_row("SELECT title, notes, session_id FROM tasks WHERE id=?1", [task_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .map_err(e)?;
-        let linked = refs(&c, &format!("{t}\n{n}"), task_id);
+        let linked = refs(&c, &format!("{t}\n{n}\n{}", notes_for(&c, task_id)), task_id);
         (t, n, s, linked)
     };
     if sid.is_some() {
@@ -557,7 +573,7 @@ fn delegate(app: AppHandle, task_id: i64, agent: String, model: String, effort: 
     let (notes, linked) = (real(&notes), real(&linked));
     let tail = tail();
     let prompt = [title.trim(), notes.trim(), linked.trim(), tail.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("\n\n");
-    start(&app, task_id, &agent, &model, &effort, &access, None, prompt, "prompt")?;
+    start(&app, task_id, &agent, &model, &effort, &access, session, prompt, "prompt")?;
     let db = app.state::<Db>();
     db.0.lock().unwrap().execute("UPDATE tasks SET agent=?1, model=?2, effort=?3, access=?4 WHERE id=?5", params![agent, model, effort, access, task_id]).map_err(e)?;
     Ok(())
@@ -578,7 +594,7 @@ fn reply(app: AppHandle, task_id: i64, text: String, model: Option<String>, effo
     if let Some(ag) = &agent { access_args(ag, &access)?; }
     app.state::<Db>().0.lock().unwrap()
         .execute("UPDATE tasks SET model=?1, effort=?2, access=?3 WHERE id=?4", params![model, effort, access, task_id]).map_err(e)?;
-    let linked = refs(&app.state::<Db>().0.lock().unwrap(), &text, task_id);
+    let linked = { let c = app.state::<Db>(); let c = c.0.lock().unwrap(); refs(&c, &format!("{text}\n{}", notes_for(&c, task_id)), task_id) };
     let media = app.state::<Media>().0.clone();
     let text = if linked.is_empty() { text } else {
         format!("{text}\n\n{}", linked.replace("](attachments/", &format!("]({}{}", media.display(), std::path::MAIN_SEPARATOR)))
@@ -593,7 +609,16 @@ fn reply(app: AppHandle, task_id: i64, text: String, model: Option<String>, effo
 fn tail() -> String {
     let o = cli::exe();
     format!("{TAIL}\n\nThe user's Orlo tasks and notes are one command away in your shell: `{o} tasks`, `{o} show <id>`, \
-`{o} add \"<title>\"`, `{o} append <id> \"<text>\"`, `{o} done <id>`. `#21` means Orlo task or note 21.")
+`{o} append <id> \"<text>\"`, `{o} done <id>`, `{o} x <id>`. `#21` means Orlo task or note 21. \
+To leave the user something to read (findings, a plan), `{o} add \"<title>\" --note --notes \"<text>\"`: it's attached to your task \
+and flagged READ THIS. You may change only your own task and its notes.")
+}
+
+/// "#28 #29": the notes agents wrote for this task, for refs() to bring along.
+fn notes_for(c: &Connection, task_id: i64) -> String {
+    c.prepare("SELECT id FROM tasks WHERE for_task=?1 AND kind='note'")
+        .and_then(|mut s| s.query_map([task_id], |r| r.get::<_, i64>(0))?.collect::<Result<Vec<_>, _>>())
+        .unwrap_or_default().iter().map(|i| format!("#{i}")).collect::<Vec<_>>().join(" ")
 }
 
 /// `#21` in a prompt means Orlo task or note 21: its title and description go along so the agent knows what the user means.
@@ -684,7 +709,8 @@ fn start(app: &AppHandle, task_id: i64, agent: &str, model: &str, effort: &str, 
     let arg = if is_exe { text.clone() } else { text.replace(['\r', '\n'], " ") };
 
     let mut cmd = Command::new(&exe);
-    cmd.current_dir(&dir).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).env_remove("CLAUDECODE");
+    // ORLO_TASK: notes the agent adds with `orlo add --note` point back at this task.
+    cmd.current_dir(&dir).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).env_remove("CLAUDECODE").env("ORLO_TASK", task_id.to_string());
     #[cfg(windows)]
     cmd.creation_flags(NO_WINDOW);
     #[cfg(unix)]
@@ -692,6 +718,8 @@ fn start(app: &AppHandle, task_id: i64, agent: &str, model: &str, effort: &str, 
     match agent {
         "claude" => {
             if let Some(s) = &sid { cmd.args(["-r", s]); }
+            // A session picked up from outside Orlo (maybe still open in a terminal) is forked: same history, its own transcript.
+            if sid.is_some() && kind == "prompt" { cmd.arg("--fork-session"); }
             cmd.arg("-p").arg(&arg).args(CLAUDE_FLAGS).args(perms);
             if !model.is_empty() { cmd.args(["--model", model]); }
             if !effort.is_empty() { cmd.args(["--effort", effort]); }
@@ -1091,6 +1119,9 @@ pub fn run() {
             let _ = c.execute("ALTER TABLE tasks ADD COLUMN verdict TEXT NOT NULL DEFAULT ''", []);
             let _ = c.execute("ALTER TABLE tasks ADD COLUMN cwd TEXT", []);
             let _ = c.execute("ALTER TABLE tasks ADD COLUMN access TEXT NOT NULL DEFAULT ''", []);
+            let _ = c.execute("ALTER TABLE tasks ADD COLUMN origin TEXT", []);
+            let _ = c.execute("ALTER TABLE tasks ADD COLUMN for_task INTEGER", []);
+            let _ = c.execute("ALTER TABLE tasks ADD COLUMN fresh INTEGER NOT NULL DEFAULT 0", []);
             app.manage(Db(Mutex::new(c)));
             let media = dir.join("attachments");
             fs::create_dir_all(&media)?;
@@ -1102,7 +1133,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            lists, add_list, rename_list, delete_list, tag_colors, set_tag_color, rename_tag, agent_skill, skill_install, search, list_dir, list_files, read_text, write_text, make_dir, rename_path, delete_path, run_cmd, stop_cmd, tasks, add_task, save_task, delete_task, events, clis, running, delegate, reply, stop, install_update, restart, attachments_dir, attach, git
+            lists, add_list, rename_list, delete_list, tag_colors, set_tag_color, rename_tag, agent_skill, skill_install, search, list_dir, list_files, read_text, write_text, make_dir, rename_path, delete_path, run_cmd, stop_cmd, tasks, add_task, seen, save_task, delete_task, events, clis, running, delegate, reply, stop, install_update, restart, attachments_dir, attach, git
         ])
         .build(tauri::generate_context!())
         .expect("error while building orlo")

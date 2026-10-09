@@ -4,7 +4,8 @@ export const MAC = navigator.userAgent.includes("Mac")
 /** Modifier key as it's printed on this keyboard: "⌘" on a Mac, "Ctrl+" elsewhere. */
 export const MOD = MAC ? "⌘" : "Ctrl+"
 
-export type Pick = { agent: string; model: string; effort: string; access: string }
+/** `session`: an existing CLI session to continue on delegate; empty starts a new one. */
+export type Pick = { agent: string; model: string; effort: string; access: string; session?: string }
 export const noPick: Pick = { agent: "", model: "", effort: "", access: "" }
 
 export const MODELS: Record<string, string[]> = {
