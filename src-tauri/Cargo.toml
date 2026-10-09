@@ -1,6 +1,6 @@
 [package]
 name = "orlo"
-version = "1.2.0"
+version = "1.2.1"
 description = "Tasks, notes and AI agents in one calm app for Windows and macOS"
 license = "MIT"
 repository = "https://github.com/carbongotfound/orlo"
