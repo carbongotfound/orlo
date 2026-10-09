@@ -22,7 +22,6 @@ from the user (ask the question just above that line).";
 const CAP_MINUTES: u64 = 20;
 const CLAUDE_FLAGS: &[&str] = &[
     "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-    "--permission-mode", "acceptEdits", "--allowedTools", "Bash,Read,Edit,Write,Glob,Grep",
     "--max-turns", "30", "--max-budget-usd", "1.50",
 ];
 // No --bare: it switches Claude Code to API-key-only auth, so a normal `claude /login` would read as "Not logged in".
@@ -40,6 +39,8 @@ CREATE TABLE IF NOT EXISTS tags(name TEXT PRIMARY KEY, color TEXT NOT NULL);
 ";
 
 struct Db(Mutex<Connection>);
+/// Images and videos added to notes live here, as attachments/<file> links in the Markdown.
+struct Media(PathBuf);
 #[derive(Default)]
 struct Runs(Mutex<HashMap<i64, Child>>);
 
@@ -52,6 +53,9 @@ struct Task {
     status: String, agent: Option<String>, session_id: Option<String>, tags: String, kind: String, model: String, effort: String, verdict: String,
     /// A project folder the agent works in (from the Code view); None means its own folder under ~/Orlo.
     cwd: Option<String>,
+    /// How much the agent may do without asking; see access_args.
+    #[serde(default)]
+    access: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -61,6 +65,31 @@ struct Ev { task_id: i64, kind: String, text: String }
 struct Cli { name: &'static str, path: Option<String>, cap: String }
 
 fn e<E: ToString>(x: E) -> String { x.to_string() }
+
+/// Model and reasoning end up as CLI args; keep them to plain identifiers.
+fn plain(s: &str) -> bool { s.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) }
+
+/// Approval flags for each access level an agent's CLI supports. "" is Orlo's default for that agent.
+/// Nobody is there to answer a prompt mid-run, so every level either allows a tool or refuses it outright.
+fn access_args(agent: &str, access: &str) -> Result<&'static [&'static str], String> {
+    Ok(match (agent, access) {
+        ("claude", "" | "edit") => &["--permission-mode", "acceptEdits", "--allowedTools", "Bash,Read,Edit,Write,Glob,Grep"],
+        ("claude", "full") => &["--permission-mode", "bypassPermissions"],
+        ("claude", "plan") => &["--permission-mode", "plan"],
+        // codex's unelevated Windows sandbox refuses every command ("cannot enforce split writable root sets"),
+        // so its default is full access; read-only still works for questions about the code.
+        ("codex", "" | "full") => &["-s", "danger-full-access"],
+        ("codex", "read") => &["-s", "read-only"],
+        ("grok", "") => &[],
+        ("grok", "full") => &["--always-approve"],
+        ("grok", "edit") => &["--permission-mode", "acceptEdits"],
+        ("grok", "plan") => &["--permission-mode", "plan"],
+        ("gemini", "" | "full") => &["--yolo"],
+        ("gemini", "edit") => &["--approval-mode", "auto_edit"],
+        ("hermes", "" | "full") => &["--yolo"],
+        _ => return Err(format!("{agent} doesn't support that access level.")),
+    })
+}
 
 /// Each delegated task gets its own folder here. ORLO_WORK overrides the default ~/Orlo.
 fn work_root() -> PathBuf {
@@ -72,10 +101,10 @@ fn work_root() -> PathBuf {
 fn read_task(r: &rusqlite::Row) -> rusqlite::Result<Task> {
     Ok(Task {
         id: r.get(0)?, title: r.get(1)?, notes: r.get(2)?, due: r.get(3)?, list_id: r.get(4)?,
-        status: r.get(5)?, agent: r.get(6)?, session_id: r.get(7)?, tags: r.get(8)?, kind: r.get(9)?, model: r.get(10)?, effort: r.get(11)?, verdict: r.get(12)?, cwd: r.get(13)?,
+        status: r.get(5)?, agent: r.get(6)?, session_id: r.get(7)?, tags: r.get(8)?, kind: r.get(9)?, model: r.get(10)?, effort: r.get(11)?, verdict: r.get(12)?, cwd: r.get(13)?, access: r.get(14)?,
     })
 }
-const TASK_COLS: &str = "id, title, notes, due, list_id, status, agent, session_id, tags, kind, model, effort, verdict, cwd";
+const TASK_COLS: &str = "id, title, notes, due, list_id, status, agent, session_id, tags, kind, model, effort, verdict, cwd, access";
 
 #[tauri::command]
 fn lists(db: State<Db>) -> Result<Vec<List>, String> {
@@ -184,7 +213,7 @@ fn list_dir(path: String) -> Result<Vec<Entry>, String> {
     let mut out: Vec<Entry> = fs::read_dir(editable(&path)?).map_err(e)?
         .filter_map(|x| x.ok())
         .map(|x| Entry { name: x.file_name().to_string_lossy().into_owned(), dir: x.file_type().is_ok_and(|t| t.is_dir()) })
-        .filter(|x| !matches!(x.name.as_str(), ".git" | "node_modules" | "target" | ".DS_Store"))
+        .filter(|x| !SKIP.contains(&x.name.as_str()))
         .collect();
     out.sort_by(|a, b| b.dir.cmp(&a.dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
     Ok(out)
@@ -205,10 +234,145 @@ fn write_text(path: String, text: String) -> Result<(), String> {
     fs::write(dir.join(p.file_name().ok_or("No file name")?), text).map_err(e)
 }
 
-/// The exe agents can run as a CLI (`orlo tasks`, `orlo show 12`…), for the palette's copy command.
+const SKIP: &[&str] = &[".git", "node_modules", "target", ".DS_Store"];
+
+/// Every file under a project, relative and with `/`, for quick open. Stops at 20,000 files.
 #[tauri::command]
-fn cli_path() -> Result<String, String> {
-    std::env::current_exe().map(|p| p.display().to_string()).map_err(e)
+fn list_files(root: String) -> Result<Vec<String>, String> {
+    let root = editable(&root)?;
+    let (mut out, mut stack) = (Vec::new(), vec![root.clone()]);
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = fs::read_dir(&d) else { continue };
+        for x in rd.flatten() {
+            let name = x.file_name().to_string_lossy().into_owned();
+            if SKIP.contains(&name.as_str()) { continue }
+            let p = x.path();
+            if x.file_type().is_ok_and(|t| t.is_dir()) {
+                if editable(&p.to_string_lossy()).is_ok() { stack.push(p) }
+            } else if let Ok(r) = p.strip_prefix(&root) {
+                out.push(r.to_string_lossy().replace('\\', "/"));
+                if out.len() >= 20_000 { return Ok(out) }
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// The parent must exist and be allowed; the new entry is created or moved inside it.
+fn in_editable_dir(path: &str) -> Result<PathBuf, String> {
+    let p = PathBuf::from(path);
+    Ok(editable(&p.parent().ok_or("No folder")?.to_string_lossy())?.join(p.file_name().ok_or("No name")?))
+}
+
+/// The Code view's Changes panel: "status", "diff" (tracked file), "diff-new" (untracked file) or "discard".
+#[tauri::command]
+fn git(root: String, op: String, path: Option<String>) -> Result<String, String> {
+    let dir = editable(&root)?;
+    let path = path.unwrap_or_default();
+    if path.starts_with('-') || path.split(['/', '\\']).any(|p| p == "..") { return Err("Bad path.".into()) }
+    let args: Vec<&str> = match op.as_str() {
+        "status" => vec!["status", "--porcelain=v1", "-uall"],
+        "diff" => vec!["diff", "HEAD", "--", &path],
+        "diff-new" => vec!["diff", "--no-index", "--", if cfg!(windows) { "NUL" } else { "/dev/null" }, &path],
+        "discard" => vec!["restore", "--source=HEAD", "--staged", "--worktree", "--", &path],
+        _ => return Err("Unknown git operation.".into()),
+    };
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(&dir).args(["-c", "core.quotepath=off", "-c", "color.ui=never"]).args(args).stdin(Stdio::null());
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut cmd, NO_WINDOW);
+    let out = cmd.output().map_err(|x| format!("git: {x}"))?;
+    // diff --no-index exits 1 when the files differ, which is the point.
+    if !out.status.success() && op != "diff-new" {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(if err.contains("not a git repository") { "not a git repository".into() } else { err.trim().to_string() });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+#[tauri::command]
+fn make_dir(path: String) -> Result<(), String> {
+    fs::create_dir(in_editable_dir(&path)?).map_err(e)
+}
+
+#[tauri::command]
+fn rename_path(from: String, to: String) -> Result<(), String> {
+    let (a, b) = (editable(&from)?, in_editable_dir(&to)?);
+    if b.exists() { return Err(format!("{} already exists.", b.display())) }
+    fs::rename(a, b).map_err(e)
+}
+
+/// Files and empty folders only, so one click can never wipe out a whole tree.
+#[tauri::command]
+fn delete_path(path: String) -> Result<(), String> {
+    let p = editable(&path)?;
+    if p.is_dir() { fs::remove_dir(&p).map_err(|_| "Only empty folders can be deleted here.".to_string()) } else { fs::remove_file(&p).map_err(e) }
+}
+
+/// The Code view's terminal: one command at a time in the project folder, output streamed as "term" events.
+#[derive(Default)]
+struct Term(Mutex<Option<Child>>);
+
+#[derive(Clone, Serialize)]
+struct TermEv { text: String, code: Option<i32>, done: bool }
+
+#[tauri::command]
+fn run_cmd(app: AppHandle, cwd: String, line: String) -> Result<(), String> {
+    let dir = editable(&cwd)?;
+    let term = app.state::<Term>();
+    let mut slot = term.0.lock().unwrap();
+    if let Some(c) = slot.as_mut() {
+        if c.try_wait().map_err(e)?.is_none() { return Err("A command is still running. Stop it first.".into()) }
+    }
+    #[cfg(windows)]
+    let mut cmd = {
+        use std::os::windows::process::CommandExt;
+        let mut c = Command::new("cmd");
+        c.raw_arg(format!("/D /S /C \"{line}\"")).creation_flags(NO_WINDOW);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut c = Command::new(std::env::var("SHELL").unwrap_or("/bin/sh".into()));
+        c.arg("-c").arg(&line);
+        std::os::unix::process::CommandExt::process_group(&mut c, 0);
+        c
+    };
+    let mut child = cmd.current_dir(dir).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .env("FORCE_COLOR", "0").env("NO_COLOR", "1").spawn().map_err(e)?;
+    let pipes: Vec<Box<dyn Read + Send>> = vec![Box::new(child.stdout.take().unwrap()), Box::new(child.stderr.take().unwrap())];
+    let readers: Vec<_> = pipes.into_iter().map(|r| {
+        let a = app.clone();
+        thread::spawn(move || {
+            let mut br = BufReader::new(r);
+            let mut buf = Vec::new();
+            while br.read_until(b'\n', &mut buf).is_ok_and(|n| n > 0) {
+                let _ = a.emit("term", TermEv { text: String::from_utf8_lossy(&buf).into_owned(), code: None, done: false });
+                buf.clear();
+            }
+        })
+    }).collect();
+    *slot = Some(child);
+    drop(slot);
+    let a = app.clone();
+    thread::spawn(move || {
+        for r in readers { let _ = r.join(); }
+        let code = a.state::<Term>().0.lock().unwrap().as_mut().and_then(|c| c.wait().ok()).and_then(|s| s.code());
+        let _ = a.emit("term", TermEv { text: String::new(), code, done: true });
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn stop_cmd(term: State<Term>) {
+    if let Some(c) = term.0.lock().unwrap().as_mut() { kill_tree(c.id()) }
+}
+
+/// `orlo skill` output, for the command menu's "Copy Orlo skill for AI agents".
+#[tauri::command]
+fn agent_skill() -> String {
+    cli::skill()
 }
 
 #[tauri::command]
@@ -275,10 +439,28 @@ fn running(runs: State<Runs>) -> Vec<i64> {
 }
 
 #[tauri::command]
-fn delegate(app: AppHandle, task_id: i64, agent: String, model: String, effort: String) -> Result<(), String> {
-    // Both end up as CLI args; keep them to plain identifiers.
-    let ok = |s: &str| s.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c));
-    if !ok(&model) || !ok(&effort) {
+fn attachments_dir(m: State<Media>) -> String {
+    m.0.display().to_string()
+}
+
+/// Stores an image or video sent as raw bytes (x-name header) and returns its Markdown path.
+#[tauri::command]
+fn attach(m: State<Media>, request: tauri::ipc::Request) -> Result<String, String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err("Expected the file's bytes.".into()) };
+    let name = request.headers().get("x-name").and_then(|v| v.to_str().ok()).unwrap_or("file");
+    let name: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '-' }).collect();
+    let name = name.trim_start_matches('.');
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(e)?.as_millis();
+    let file = format!("{stamp}-{name}");
+    fs::write(m.0.join(&file), bytes).map_err(e)?;
+    Ok(format!("attachments/{file}"))
+}
+
+#[tauri::command]
+fn delegate(app: AppHandle, task_id: i64, agent: String, model: String, effort: String, access: Option<String>) -> Result<(), String> {
+    let access = access.unwrap_or_default();
+    access_args(&agent, &access)?;
+    if !plain(&model) || !plain(&effort) {
         return Err("Model and reasoning may only use letters, digits, '.', '_' and '-'.".into());
     }
     let (title, notes, sid): (String, String, Option<String>) = {
@@ -290,22 +472,33 @@ fn delegate(app: AppHandle, task_id: i64, agent: String, model: String, effort: 
     if sid.is_some() {
         return Err("This task already has a session. Reply to continue it.".into());
     }
+    // Agents get real paths for attached images and videos.
+    let media = app.state::<Media>().0.clone();
+    let notes = notes.replace("](attachments/", &format!("]({}{}", media.display(), std::path::MAIN_SEPARATOR));
     let prompt = [title.trim(), notes.trim(), TAIL].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("\n\n");
-    start(&app, task_id, &agent, &model, &effort, None, prompt, "prompt")?;
+    start(&app, task_id, &agent, &model, &effort, &access, None, prompt, "prompt")?;
     let db = app.state::<Db>();
-    db.0.lock().unwrap().execute("UPDATE tasks SET agent=?1, model=?2, effort=?3 WHERE id=?4", params![agent, model, effort, task_id]).map_err(e)?;
+    db.0.lock().unwrap().execute("UPDATE tasks SET agent=?1, model=?2, effort=?3, access=?4 WHERE id=?5", params![agent, model, effort, access, task_id]).map_err(e)?;
     Ok(())
 }
 
+/// Continues the session. Model, reasoning and access may change between turns (the Code view's pickers, /model).
 #[tauri::command]
-fn reply(app: AppHandle, task_id: i64, text: String) -> Result<(), String> {
-    let (agent, sid, model, effort): (Option<String>, Option<String>, String, String) = {
+fn reply(app: AppHandle, task_id: i64, text: String, model: Option<String>, effort: Option<String>, access: Option<String>) -> Result<(), String> {
+    let (agent, sid, m, x, a): (Option<String>, Option<String>, String, String, String) = {
         let c = app.state::<Db>();
         let c = c.0.lock().unwrap();
-        c.query_row("SELECT agent, session_id, model, effort FROM tasks WHERE id=?1", [task_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map_err(e)?
+        c.query_row("SELECT agent, session_id, model, effort, access FROM tasks WHERE id=?1", [task_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).map_err(e)?
     };
+    let (model, effort, access) = (model.unwrap_or(m), effort.unwrap_or(x), access.unwrap_or(a));
+    if !plain(&model) || !plain(&effort) {
+        return Err("Model and reasoning may only use letters, digits, '.', '_' and '-'.".into());
+    }
+    if let Some(ag) = &agent { access_args(ag, &access)?; }
+    app.state::<Db>().0.lock().unwrap()
+        .execute("UPDATE tasks SET model=?1, effort=?2, access=?3 WHERE id=?4", params![model, effort, access, task_id]).map_err(e)?;
     match (agent, sid) {
-        (Some(a), Some(s)) => start(&app, task_id, &a, &model, &effort, Some(s), text, "reply"),
+        (Some(a), Some(s)) => start(&app, task_id, &a, &model, &effort, &access, Some(s), text, "reply"),
         _ => Err("No session to resume yet.".into()),
     }
 }
@@ -343,7 +536,7 @@ fn notify(app: &AppHandle, task_id: i64, agent: &str, body: &str) {
 }
 
 fn push(app: &AppHandle, task_id: i64, kind: &str, text: &str) {
-    if kind != "delta" {
+    if !matches!(kind, "delta" | "commands") {
         let db = app.state::<Db>();
         let _ = db.0.lock().unwrap().execute("INSERT INTO events(task_id, kind, text) VALUES (?1, ?2, ?3)", params![task_id, kind, text]);
     }
@@ -351,7 +544,8 @@ fn push(app: &AppHandle, task_id: i64, kind: &str, text: &str) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn start(app: &AppHandle, task_id: i64, agent: &str, model: &str, effort: &str, sid: Option<String>, text: String, kind: &str) -> Result<(), String> {
+fn start(app: &AppHandle, task_id: i64, agent: &str, model: &str, effort: &str, access: &str, sid: Option<String>, text: String, kind: &str) -> Result<(), String> {
+    let perms = access_args(agent, access)?;
     let runs = app.state::<Runs>();
     let mut map = runs.0.lock().unwrap();
     if map.contains_key(&task_id) {
@@ -374,14 +568,12 @@ fn start(app: &AppHandle, task_id: i64, agent: &str, model: &str, effort: &str, 
     match agent {
         "claude" => {
             if let Some(s) = &sid { cmd.args(["-r", s]); }
-            cmd.arg("-p").arg(&arg).args(CLAUDE_FLAGS);
+            cmd.arg("-p").arg(&arg).args(CLAUDE_FLAGS).args(perms);
             if !model.is_empty() { cmd.args(["--model", model]); }
             if !effort.is_empty() { cmd.args(["--effort", effort]); }
         }
         "codex" => {
-            // codex's unelevated Windows sandbox refuses every command ("cannot enforce split writable
-            // root sets"), so it gets the same full user access the claude agent has through Bash.
-            cmd.args(["exec", "--skip-git-repo-check", "-s", "danger-full-access"]);
+            cmd.args(["exec", "--skip-git-repo-check"]).args(perms);
             if !model.is_empty() { cmd.args(["-m", model]); }
             if !effort.is_empty() { cmd.arg("-c").arg(format!("model_reasoning_effort={effort}")); }
             if let Some(s) = &sid { cmd.args(["resume", s]); }
@@ -390,19 +582,21 @@ fn start(app: &AppHandle, task_id: i64, agent: &str, model: &str, effort: &str, 
         "grok" => {
             cmd.arg("--no-auto-update");
             if let Some(s) = &sid { cmd.args(["-r", s]); }
-            cmd.arg("-p").arg(&arg).args(["--output-format", "streaming-json"]);
+            if !model.is_empty() { cmd.args(["-m", model]); }
+            if !effort.is_empty() { cmd.args(["--reasoning-effort", effort]); }
+            cmd.args(perms).arg("-p").arg(&arg).args(["--output-format", "streaming-json"]);
         }
         "hermes" => {
             // Nous Research's Hermes Agent: one query, quiet output, no approval prompts nobody could answer.
             cmd.arg("chat");
             if let Some(s) = &sid { cmd.args(["-r", s]); }
-            cmd.args(["-Q", "--yolo"]);
+            cmd.arg("-Q").args(perms);
             if !model.is_empty() { cmd.args(["-m", model]); }
             cmd.arg("-q").arg(&arg);
         }
         "gemini" => {
             if let Some(s) = &sid { cmd.args(["--resume", s]); }
-            cmd.arg("-p").arg(&arg).args(["--yolo", "--output-format", "stream-json"]);
+            cmd.arg("-p").arg(&arg).args(perms).args(["--output-format", "stream-json"]);
             if !model.is_empty() { cmd.args(["-m", model]); }
         }
         _ => return Err(format!("Unknown agent {agent}")),
@@ -496,7 +690,7 @@ fn status_in(text: &str) -> Option<&'static str> {
 
 /// Turns one output line from any of the CLIs into thread events.
 #[derive(Default)]
-struct Sink { is_err: bool, live: String, prev: String, sid: Option<String>, last: String }
+struct Sink { is_err: bool, live: String, prev: String, sid: Option<String>, last: String, cmds: bool }
 
 impl Sink {
     /// Streamed text so far as one finished message.
@@ -605,7 +799,20 @@ impl Sink {
                 }
                 None => vec![],
             },
-            "system" | "user" | "init" | "tool_result" | "thought" | "tool_call_update" | "available_commands" | "usage" => vec![],
+            "system" if s("/subtype") == Some("compact_boundary") => {
+                let n = |p: &str| v.pointer(p).and_then(Value::as_u64).unwrap_or(0);
+                vec![("cost", format!("Compacted the conversation · {} → {} tokens", n("/compact_metadata/pre_tokens"), n("/compact_metadata/post_tokens")))]
+            }
+            // Claude lists its slash commands in its init line, Grok in available_commands (repeated, so only the first counts).
+            "system" | "available_commands" => match v.get("slash_commands").or(v.get("commands")).and_then(Value::as_array) {
+                Some(list) if !self.cmds => {
+                    self.cmds = true;
+                    let names: Vec<&str> = list.iter().filter_map(Value::as_str).collect();
+                    vec![("commands", names.join(","))]
+                }
+                _ => vec![],
+            },
+            "user" | "init" | "tool_result" | "thought" | "tool_call_update" | "usage" => vec![],
             _ => {
                 if let Some(r) = s("/result") {
                     self.live.clear();
@@ -726,6 +933,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(Runs::default())
+        .manage(Term::default())
         .setup(|app| {
             // ORLO_DATA keeps a dev or demo database apart from the real one.
             let dir = match std::env::var_os("ORLO_DATA") { Some(d) => PathBuf::from(d), None => app.path().app_data_dir()? };
@@ -741,13 +949,19 @@ pub fn run() {
             let _ = c.execute("ALTER TABLE tasks ADD COLUMN effort TEXT NOT NULL DEFAULT ''", []);
             let _ = c.execute("ALTER TABLE tasks ADD COLUMN verdict TEXT NOT NULL DEFAULT ''", []);
             let _ = c.execute("ALTER TABLE tasks ADD COLUMN cwd TEXT", []);
+            let _ = c.execute("ALTER TABLE tasks ADD COLUMN access TEXT NOT NULL DEFAULT ''", []);
             app.manage(Db(Mutex::new(c)));
+            let media = dir.join("attachments");
+            fs::create_dir_all(&media)?;
+            // The webview may load files from this folder only.
+            app.asset_protocol_scope().allow_directory(&media, false)?;
+            app.manage(Media(media));
             // Left behind by install_update; the previous process may still hold it, then it goes next time.
             if let Ok(exe) = std::env::current_exe() { let _ = fs::remove_file(exe.with_extension("old")); }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            lists, add_list, rename_list, delete_list, tag_colors, set_tag_color, rename_tag, cli_path, list_dir, read_text, write_text, tasks, add_task, save_task, delete_task, events, clis, running, delegate, reply, stop, install_update
+            lists, add_list, rename_list, delete_list, tag_colors, set_tag_color, rename_tag, agent_skill, list_dir, list_files, read_text, write_text, make_dir, rename_path, delete_path, run_cmd, stop_cmd, tasks, add_task, save_task, delete_task, events, clis, running, delegate, reply, stop, install_update, attachments_dir, attach, git
         ])
         .build(tauri::generate_context!())
         .expect("error while building orlo")
@@ -757,6 +971,7 @@ pub fn run() {
                 for (_, c) in app.state::<Runs>().0.lock().unwrap().drain() {
                     kill_tree(c.id());
                 }
+                if let Some(c) = app.state::<Term>().0.lock().unwrap().as_mut() { kill_tree(c.id()) }
             }
         });
 }
@@ -798,6 +1013,10 @@ mod tests {
         assert_eq!(
             s.line(r#"{"type":"result","result":"Done","total_cost_usd":0.0812,"num_turns":3}"#),
             vec![("result", "Done".into()), ("cost", "$0.08 · 3 turns".into())]
+        );
+        assert_eq!(
+            s.line(r#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":40215,"post_tokens":6668}}"#),
+            vec![("cost", "Compacted the conversation · 40215 → 6668 tokens".into())]
         );
         s.line(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"All done."}]}}"#);
         assert_eq!(s.line(r#"{"type":"result","result":"All done.","total_cost_usd":0.1,"num_turns":1}"#), vec![("cost", "$0.10 · 1 turns".into())]);
@@ -845,6 +1064,11 @@ mod tests {
         let mut k = Sink::default();
         assert!(k.line(r#"{"type":"thought","data":" verify the success "}"#).is_empty());
         assert!(k.line(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#).is_empty());
+        assert_eq!(k.line(r#"{"type":"available_commands","tools":["read_file"],"commands":["compact","review"]}"#), vec![("commands", "compact,review".into())]);
+        assert!(k.line(r#"{"type":"available_commands","commands":["compact"]}"#).is_empty());
+        // Grok names its session only on the last line; that is enough to resume it.
+        k.line(r#"{"type":"end","stopReason":"end_turn","sessionId":"97c18453-fb89"}"#);
+        assert_eq!(k.sid.as_deref(), Some("97c18453-fb89"));
         assert_eq!(k.line(r#"{"type":"text","data":"Reading it."}"#), vec![("delta", "Reading it.".into())]);
         assert_eq!(
             k.line(r#"{"type":"tool_call","toolCallId":"c-1","status":"pending","toolName":"read_file","rawInput":{"target_file":"a.md"}}"#),

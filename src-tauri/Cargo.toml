@@ -1,6 +1,6 @@
 [package]
 name = "orlo"
-version = "1.1.0"
+version = "1.2.0"
 description = "Tasks, notes and AI agents in one calm app for Windows and macOS"
 license = "MIT"
 repository = "https://github.com/carbongotfound/orlo"
@@ -14,7 +14,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.40.2", features = ["bundled"] }

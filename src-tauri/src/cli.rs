@@ -1,4 +1,4 @@
-//! `orlo tasks|notes|show|done|reopen`: read and check off Orlo tasks from a terminal, so any agent can pick work up.
+//! `orlo tasks|notes|show|done|reopen|add|append|skill`: Orlo tasks from a terminal, so any agent can pick work up and file new work.
 //! Runs before the window is created and talks to the same SQLite file the app uses.
 use rusqlite::{params, Connection, OpenFlags};
 use serde_json::{json, Value};
@@ -11,6 +11,10 @@ const HELP: &str = "Orlo CLI: your Orlo tasks and notes, for you and your agents
   orlo show <id> [--json]       one task or note in full
   orlo done <id>                check a task off
   orlo reopen <id>              open it again
+  orlo add <title> [--note] [--notes <text>] [--due YYYY-MM-DD] [--tag <tag>]...
+                                add a task (or a note); prints its id
+  orlo append <id> <text>       add a line to a task's or note's description
+  orlo skill                    instructions for AI agents, as a SKILL.md
 
 ORLO_DATA points at another data folder.";
 
@@ -18,13 +22,19 @@ ORLO_DATA points at another data folder.";
 pub fn main() -> Option<i32> {
     let args: Vec<String> = env::args().skip(1).collect();
     let cmd = args.first()?.as_str();
-    if !["tasks", "notes", "show", "done", "reopen", "help", "--help", "-h"].contains(&cmd) {
+    if !["tasks", "notes", "show", "done", "reopen", "add", "append", "skill", "help", "--help", "-h"].contains(&cmd) {
         return None;
     }
     attach_console();
     let flag = |f: &str| args.iter().any(|a| a == f);
     let id = args.get(1).and_then(|s| s.trim_start_matches('#').parse::<i64>().ok());
-    match run(cmd, id, flag("--json"), flag("--all")) {
+    let result = match cmd {
+        "add" => add(&args),
+        "append" => append(id, args.get(2)),
+        "skill" => Ok(skill()),
+        _ => run(cmd, id, flag("--json"), flag("--all")),
+    };
+    match result {
         Ok(out) => {
             println!("{out}");
             Some(0)
@@ -52,14 +62,89 @@ pub fn data_dir() -> PathBuf {
     base.join("com.orlo.app")
 }
 
-fn run(cmd: &str, id: Option<i64>, as_json: bool, all: bool) -> Result<String, String> {
-    if cmd.starts_with('-') || cmd == "help" {
-        return Ok(HELP.into());
-    }
+fn open() -> Result<Connection, String> {
     let path = data_dir().join("orlo.db");
     let c = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .map_err(|_| format!("no Orlo data at {}. Open Orlo once first.", path.display()))?;
     c.busy_timeout(Duration::from_secs(5)).map_err(|x| x.to_string())?;
+    Ok(c)
+}
+
+fn add(args: &[String]) -> Result<String, String> {
+    const USAGE: &str = "usage: orlo add <title> [--note] [--notes <text>] [--due YYYY-MM-DD] [--tag <tag>]...";
+    let title = args.get(1).filter(|t| !t.starts_with("--") && !t.trim().is_empty()).ok_or(USAGE)?;
+    let value = |f: &str| args.iter().position(|a| a == f).map(|i| args.get(i + 1).cloned().ok_or(USAGE));
+    let note = args.iter().any(|a| a == "--note");
+    let due = value("--due").transpose()?;
+    if let Some(d) = &due {
+        let ok = d.len() == 10 && d.char_indices().all(|(i, ch)| if i == 4 || i == 7 { ch == '-' } else { ch.is_ascii_digit() });
+        if !ok || note { return Err(if note { "notes don't take a due date".into() } else { format!("--due wants YYYY-MM-DD, got {d}") }); }
+    }
+    let tags: Vec<&str> = args.windows(2).filter(|w| w[0] == "--tag").map(|w| w[1].trim_start_matches('#')).collect();
+    let c = open()?;
+    c.execute(
+        "INSERT INTO tasks(title, notes, due, kind, tags) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![title.trim(), value("--notes").transpose()?.unwrap_or_default(), due, if note { "note" } else { "task" }, tags.join(",")],
+    ).map_err(|x| x.to_string())?;
+    Ok(format!("#{} added", c.last_insert_rowid()))
+}
+
+fn append(id: Option<i64>, text: Option<&String>) -> Result<String, String> {
+    let (id, text) = id.zip(text).ok_or("usage: orlo append <id> <text>")?;
+    let n = open()?.execute(
+        "UPDATE tasks SET notes = CASE WHEN trim(notes)='' THEN ?1 ELSE rtrim(notes) || char(10) || char(10) || ?1 END WHERE id=?2 AND kind IN ('task','note')",
+        params![text.trim(), id],
+    ).map_err(|x| x.to_string())?;
+    if n == 0 { return Err(format!("no task #{id}")); }
+    Ok(format!("#{id} updated"))
+}
+
+/// A skill file for Claude Code (~/.claude/skills/orlo/SKILL.md) and the like; also works pasted into any agent's instructions.
+pub fn skill() -> String {
+    let exe = env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "orlo".into());
+    let exe = if exe.contains(' ') { format!("\"{exe}\"") } else { exe };
+    format!(r#"---
+name: orlo
+description: Read, add and check off the user's Orlo tasks and notes. Use when the user mentions Orlo, their to-do list, tasks or notes, asks what to work on next, or when you finish, discover or leave behind work worth tracking.
+---
+
+# Orlo
+
+Orlo is the user's to-do and notes app. Its executable doubles as a CLI that reads and writes the same local database:
+
+    {exe}
+
+Every command prints plain text; add `--json` to `tasks`, `notes` and `show` for structured output.
+
+| Command | What it does |
+|---|---|
+| `{exe} tasks` | Open tasks, one per line: `#id [ ] title · due · list · #tags · agent: verdict`, then the first line of the description |
+| `{exe} tasks --all` | Done tasks too |
+| `{exe} notes` | Notes |
+| `{exe} show <id>` | One task or note in full, with its whole description (Markdown) |
+| `{exe} add "<title>" [--notes "<text>"] [--due YYYY-MM-DD] [--tag <tag>]...` | Add a task; prints `#id added` |
+| `{exe} add "<title>" --note --notes "<text>"` | Add a note |
+| `{exe} append <id> "<text>"` | Add a paragraph to a task's or note's description |
+| `{exe} done <id>` | Check a task off |
+| `{exe} reopen <id>` | Open it again |
+
+## How to use it
+
+- Before starting, run `tasks` (and `show <id>` for anything relevant) so you work on what the user actually has planned.
+- When you finish a task the user gave you that is also in Orlo, `append` a one-line summary of what you did, then mark it `done`.
+- Only mark tasks done that you actually completed. If you only got part of the way, `append` what's left instead.
+- When you find follow-up work you won't do now (a bug, a TODO, a question for the user), `add` it as a task with a clear title and enough context in `--notes` for someone to pick it up cold.
+- Keep titles short and imperative ("Fix login timeout on Safari"). Put detail in `--notes`.
+- Don't delete or rewrite the user's existing text; `append` only adds.
+- The Orlo window picks up changes when the user switches back to it.
+"#)
+}
+
+fn run(cmd: &str, id: Option<i64>, as_json: bool, all: bool) -> Result<String, String> {
+    if cmd.starts_with('-') || cmd == "help" {
+        return Ok(HELP.into());
+    }
+    let c = open()?;
     let need = || id.ok_or(format!("usage: orlo {cmd} <id>"));
     match cmd {
         "done" | "reopen" => {

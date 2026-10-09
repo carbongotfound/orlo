@@ -1,11 +1,12 @@
 import { useEffect, useRef } from "react"
+import { convertFileSrc, invoke } from "@tauri-apps/api/core"
 import { EditorSelection, EditorState, Prec, type Range, type Transaction } from "@codemirror/state"
 import { Decoration, EditorView, ViewPlugin, WidgetType, keymap, placeholder, type DecorationSet, type ViewUpdate } from "@codemirror/view"
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands"
 import { syntaxTree } from "@codemirror/language"
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown"
 import {
-  Bold, Code, Copy, Heading1, Heading2, Italic, Link, List, ListChecks, ListOrdered, Quote, SquareCode, Strikethrough,
+  Bold, Code, Copy, Heading1, ImagePlus, Heading2, Italic, Link, List, ListChecks, ListOrdered, Quote, SquareCode, Strikethrough,
 } from "lucide-react"
 import { toast } from "sonner"
 import { cn } from "cn"
@@ -74,6 +75,51 @@ class Rule extends WidgetType {
   }
 }
 
+// Attached images and videos: ![name](attachments/file) in the text, shown inline.
+const mediaDir = invoke<string>("attachments_dir").catch(() => "")
+const VIDEO = /\.(mp4|webm|mov|m4v|ogv)$/i
+export async function mediaSrc(url: string) {
+  if (/^https?:/.test(url)) return url
+  if (!url.startsWith("attachments/")) return ""
+  const dir = await mediaDir
+  return dir ? convertFileSrc(dir + (dir.includes("\\") ? "\\" : "/") + url.slice(12)) : ""
+}
+export const firstImage = (md: string) => /!\[[^\]]*\]\((attachments\/[^)\s]+|https?:[^)\s]+)\)/.exec(md)?.[1]
+
+class Media extends WidgetType {
+  constructor(readonly url: string, readonly alt: string) { super() }
+  eq(o: Media) { return o.url === this.url }
+  toDOM(view: EditorView) {
+    const video = VIDEO.test(this.url)
+    const el = document.createElement(video ? "video" : "img")
+    el.className = "md-media"
+    if (el instanceof HTMLVideoElement) { el.controls = true; el.preload = "metadata" } else el.alt = this.alt
+    el.addEventListener(video ? "loadedmetadata" : "load", () => view.requestMeasure())
+    mediaSrc(this.url).then((src) => { el.src = src })
+    return el
+  }
+  ignoreEvent() { return true }
+}
+
+// Copies files into Orlo's attachments folder and puts a link for each one at the cursor (or the drop point).
+async function attach(v: EditorView, files: File[], at = v.state.selection.main.head) {
+  const links: string[] = []
+  for (const f of files) {
+    if (!/^(image|video)\//.test(f.type)) { toast.error(`${f.name} isn't an image or video.`); continue }
+    try {
+      const path = await invoke<string>("attach", new Uint8Array(await f.arrayBuffer()), { headers: { "x-name": f.name.replace(/[^\w.-]+/g, "-") } })
+      links.push(`![${f.name.replace(/[[\]]/g, "")}](${path})`)
+    } catch (e) { toast.error(String(e)) }
+  }
+  if (!links.length) return
+  const line = v.state.doc.lineAt(at)
+  const text = (line.text.trim() ? "\n" : "") + links.join("\n") + "\n"
+  const pos = line.text.trim() ? line.to : at
+  v.dispatch({ changes: { from: pos, insert: text }, selection: { anchor: pos + text.length } })
+  v.focus()
+}
+const filesOf = (d: DataTransfer | null) => [...(d?.files ?? [])].filter((f) => /^(image|video)\//.test(f.type))
+
 const hide = Decoration.replace({})
 const mark = (cls: string) => Decoration.mark({ class: cls })
 const line = (cls: string) => Decoration.line({ class: cls })
@@ -90,6 +136,14 @@ function decorate(view: EditorView) {
         const name = n.name
         const h = /^ATXHeading(\d)$/.exec(name)
         if (h) out.push(line(`md-h${h[1]}`).range(state.doc.lineAt(n.from).from))
+        else if (name === "Image") {
+          const url = n.node.getChild("URL")
+          if (!url) return
+          const w = new Media(state.sliceDoc(url.from, url.to), state.sliceDoc(n.from + 2, state.sliceDoc(n.from, n.to).indexOf("]") + n.from))
+          // Shown alone; the Markdown comes back while the cursor is on it.
+          if (!near(n.from, n.to)) { out.push(Decoration.replace({ widget: w }).range(n.from, n.to)); return false }
+          out.push(Decoration.widget({ widget: w, side: 1 }).range(n.to))
+        }
         else if (INLINE[name]) out.push(mark(INLINE[name]).range(n.from, n.to))
         else if (name === "Blockquote") {
           for (let p = n.from; p <= n.to;) {
@@ -264,7 +318,8 @@ const keys = Prec.highest(keymap.of([
 
 // Rough plain text for previews on cards.
 export const plain = (md: string) =>
-  md.replace(/^\s*(> ?)*(#{1,6} |[-*+] \[[ xX]\] |[-*+] |\d+[.)] )?/gm, "")
+  md.replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+    .replace(/^\s*(> ?)*(#{1,6} |[-*+] \[[ xX]\] |[-*+] |\d+[.)] )?/gm, "")
     .replace(/^(```.*|---+)$/gm, "")
     .replace(/(\*\*|__|~~|`)/g, "")
     .replace(/(^|[^\w*])\*([^*\n]+)\*(?!\w)/g, "$1$2")
@@ -307,7 +362,17 @@ export function MdEditor({ value, onChange, hint, className }: {
             clearTimeout(timer)
             timer = window.setTimeout(flush, 500)
           }),
-          EditorView.domEventHandlers({ blur: flush }),
+          EditorView.domEventHandlers({
+            blur: flush,
+            paste: (e, v) => { const fs = filesOf(e.clipboardData); if (!fs.length) return false; e.preventDefault(); attach(v, fs); return true },
+            drop: (e, v) => {
+              const fs = filesOf(e.dataTransfer)
+              if (!fs.length) return false
+              e.preventDefault()
+              attach(v, fs, v.posAtCoords({ x: e.clientX, y: e.clientY }) ?? undefined)
+              return true
+            },
+          }),
         ],
       }),
     })
@@ -316,6 +381,7 @@ export function MdEditor({ value, onChange, hint, className }: {
     // The editor owns the text after mount; the parent remounts it per task.
   }, [])
 
+  const picker = useRef<HTMLInputElement>(null)
   const copy = async () => {
     await navigator.clipboard.writeText(view.current?.state.doc.toString() ?? "")
     toast.success("Copied as Markdown")
@@ -337,6 +403,16 @@ export function MdEditor({ value, onChange, hint, className }: {
             ))}
           </div>
         ))}
+        <div className="flex items-center gap-0.5 border-l pl-0.5">
+          <Tooltip>
+            <TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="Add image or video" onMouseDown={(e) => e.preventDefault()} onClick={() => picker.current?.click()} />}>
+              <ImagePlus />
+            </TooltipTrigger>
+            <TooltipContent>Add image or video (or paste / drop one)</TooltipContent>
+          </Tooltip>
+          <input ref={picker} type="file" accept="image/*,video/*" multiple hidden
+            onChange={(e) => { if (view.current) attach(view.current, [...(e.target.files ?? [])]); e.target.value = "" }} />
+        </div>
         <Tooltip>
           <TooltipTrigger render={<Button variant="ghost" size="icon-xs" className="ml-auto" aria-label="Copy as Markdown" onClick={copy} />}>
             <Copy />

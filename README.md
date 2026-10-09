@@ -21,16 +21,26 @@ Write a task, hand it to Claude Code, Codex, Grok, Hermes or Gemini, then review
 ## Features
 
 - **Tasks:** one list with Overdue, Today, Upcoming and No date sections. Tasks you've handed to an agent sit at the top. Add lists, `#tags` and due dates, then switch between list and board. Rename a tag or pick its color from the tag's menu in the sidebar.
+- **Dates as you type:** end a new task with `today`, `tomorrow`, `friday`, `next week` or `in 3 days` and it gets that due date.
 - **Delegate to agents:** send a task to the `claude`, `codex`, `grok`, `hermes` or `gemini` CLI you already use. The agent works in its own folder, streams its progress into the task, and ends by reporting one of three outcomes: done, needs review or needs input.
 - **Review loop:** reply to ask for changes, which resumes the same session. Approve to check the task off. Stop kills the run.
 - **Markdown notes:**
   - Formatting appears as you type: `#` gives a heading, `-` a list, `- [ ]` a checklist and `>` a quote.
   - **Bold**, *italic*, `code` and links render inline too.
   - Copying always gives you the raw Markdown.
-- **Code:** open a project folder to browse its files, edit them with syntax highlighting and save with <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>S</kbd>. Type a request in the box underneath and pick an agent: it works in that folder, and open files reload when it finishes.
+  - **Images and videos:** paste, drop or pick them with the image button. They show inline in notes and task descriptions, and the first image becomes the note's cover.
+- **Code:** a small editor for your projects, with an agent beside it.
+  - **Several projects** open at once as tabs along the top; each keeps its own files, terminal and conversation.
+  - **Editor:** syntax highlighting, find and replace, multiple cursors, folding, bracket matching and word completion. <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>P</kbd> jumps to any file.
+  - **Files:** right-click to create, rename, delete, copy a path or mention a file in the chat.
+  - **Run** (<kbd>F5</kbd>) saves the open file and runs it in the terminal: Python, Node, TypeScript (via `tsx`), shell, PowerShell, Go, Ruby and more.
+  - **Terminal** (<kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>J</kbd>) runs one command at a time in the project folder. It isn't interactive, so commands that wait for input won't work.
+  - **Changes:** for a git project, see every file changed since the last commit, read the diff and discard what you don't want. Handy right after an agent run.
+  - **Agent chat** (<kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>L</kbd> opens and closes it): talk to Claude, Codex, Grok, Hermes or Gemini about the project. Pick the model, reasoning effort and access level each agent supports. Conversations stay with the project and never show up as tasks. Replies continue the same session.
+  - **Slash commands:** `/clear` starts a new conversation, `/model`, `/effort` and `/access` switch settings, `/stop` stops the run. The agent's own commands are listed too: Claude reports its commands (such as `/compact`) and Grok its own (`/compact`, `/context`, `/review` and more). `@` mentions a file.
 - **Agents in the sidebar:** click one to see every task it has completed.
 - **Notifications:** a bell inside the app plus a system notification with sound when an agent finishes, needs your review or needs an answer, and reminders for tasks that are overdue, due today or due tomorrow (while Orlo is open).
-- **Agent CLI:** agents (or you) can read tasks and notes from a terminal. See [Agent CLI](#agent-cli).
+- **Agent CLI and skill:** agents (or you) can list, add and check off tasks from a terminal, and one command gives your agent a ready-made skill for it. See [Agent CLI](#agent-cli).
 - **One window:** opening Orlo again brings the open window forward instead of starting a second copy.
 - **Command menu:** <kbd>Ctrl</kbd>+<kbd>K</kbd> searches everything and runs any command.
 - **Local-first:** everything lives in a SQLite file on your computer. There's no account, no server and no telemetry. The only request Orlo itself makes is the update check against GitHub releases.
@@ -85,9 +95,19 @@ Orlo is an independent project. It is **not affiliated with, endorsed by or spon
   - Hermes Agent ([MIT](https://github.com/NousResearch/hermes-agent/blob/main/LICENSE)) talks to whichever model provider you set up in `hermes setup`, so that provider's terms apply.
 
 **What an agent is allowed to do.** Agents run commands with your user's permissions, so only delegate work you'd be happy to run yourself.
-- **Claude** runs with `--permission-mode acceptEdits --allowedTools Bash,Read,Edit,Write,Glob,Grep --max-turns 30 --max-budget-usd 1.50`.
-- **Codex** runs with `-s danger-full-access`, because its sandbox on Windows refuses every command when Orlo launches it.
-- **Hermes** runs `hermes chat -Q --yolo -q <task>` and **Gemini** runs `gemini -p <task> --yolo`. Nobody is there to answer approval prompts, so prompts are turned off for these two, as with Codex.
+Pick the access level next to the model. Each agent offers only the levels its CLI supports:
+
+| Agent | Access levels (first is the default) |
+|---|---|
+| Claude | **Edit files** (`--permission-mode acceptEdits --allowedTools Bash,Read,Edit,Write,Glob,Grep`) · Full access (`bypassPermissions`) · Plan only (`plan`) |
+| Codex | **Full access** (`-s danger-full-access`, because its sandbox on Windows refuses every command when Orlo launches it) · Read only (`-s read-only`) |
+| Grok | **Default** (Grok's own settings) · Accept edits · Auto-approve all (`--always-approve`) · Plan only |
+| Gemini | **Full access** (`--yolo`) · Auto-approve edits (`--approval-mode auto_edit`) |
+| Hermes | **Full access** (`--yolo`) |
+
+- **Claude** also runs with `--max-turns 30 --max-budget-usd 1.50`.
+- **Grok** takes a model (`grok-4.7`, `grok-4.7-build-fast`, `grok-4.6`, `grok-4.5`) and reasoning effort (low, medium, high), and replies resume the same Grok session.
+- Nobody is there to answer approval prompts, so a level that would ask for approval refuses instead.
 - **Every run** is stopped after 20 minutes. Stop ends it straight away, and closing Orlo ends any agent still running.
 
 Claude, Codex, Grok, Hermes and Gemini names and logos are trademarks of their owners. They appear here only to show which tool a task uses. The logo artwork comes from [@lobehub/icons](https://github.com/lobehub/lobe-icons) (MIT).
@@ -106,21 +126,33 @@ Claude, Codex, Grok, Hermes and Gemini names and logos are trademarks of their o
 | <kbd>Esc</kbd> | Close panel |
 | <kbd>Ctrl</kbd>+<kbd>B</kbd> / <kbd>I</kbd> / <kbd>E</kbd> | Bold, italic, inline code (in notes) |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>1</kbd>–<kbd>3</kbd> | Heading 1–3 (in notes) |
+| <kbd>Ctrl</kbd>+<kbd>P</kbd> / <kbd>S</kbd> / <kbd>F</kbd> | Go to file, save, find and replace (in Code) |
+| <kbd>Ctrl</kbd>+<kbd>J</kbd> / <kbd>L</kbd> | Terminal, agent chat (in Code) |
+| <kbd>F5</kbd> | Run the open file (in Code) |
+
+On a Mac, use <kbd>⌘</kbd> where this table says <kbd>Ctrl</kbd>. Orlo shows the right key for your system everywhere.
 
 ## Agent CLI
 
-The Orlo app is also a command-line tool, so any agent (Claude Code, Codex, a script) can pick up work from your list:
+The Orlo app is also a command-line tool, so any agent (Claude Code, Codex, a script) can pick up work from your list and file new work:
 
 ```sh
 orlo tasks            # open tasks with the first line of each description (--all adds done ones)
 orlo notes            # notes
 orlo show 12          # one task or note in full
+orlo add "Fix the login timeout" --notes "Happens on Safari only" --due 2026-10-12 --tag Work
+orlo add "Standup ideas" --note --notes "..."
+orlo append 12 "Done: rewrote the retry loop, tests pass."
 orlo done 12          # check it off (Orlo picks this up when you switch back to it)
 orlo reopen 12
-orlo tasks --json     # every command also takes --json
+orlo tasks --json     # tasks, notes and show also take --json
 ```
 
-`orlo` is the Orlo app's own executable, so there's nothing extra to install. Pick **Copy CLI command for agents** in the command menu to get its full path on your machine and paste it into your agent's instructions.
+`orlo` is the Orlo app's own executable, so there's nothing extra to install.
+
+**Teach your agent Orlo.** Pick **Copy Orlo skill for AI agents** in the command menu (<kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>K</kbd>), or run `orlo skill`. You get a `SKILL.md` with the full path to Orlo on your machine, the commands, and when to use them. Then either:
+- paste it into your agent's instructions (`AGENTS.md`, `CLAUDE.md`, a custom prompt), or
+- save it as a Claude Code skill: `orlo skill > ~/.claude/skills/orlo/SKILL.md` (create the folder first).
 
 On Windows the exe is a windowed app, so pipe its output when you run it in a terminal yourself (`orlo tasks | more`). Agents capture the output, so they don't need to.
 
@@ -130,8 +162,9 @@ On Windows the exe is a windowed app, so pipe its output when you run it in a te
 |---|---|
 | Tasks, notes, lists, agent logs | Windows: `%APPDATA%\com.orlo.app\orlo.db` · macOS: `~/Library/Application Support/com.orlo.app/orlo.db` (SQLite) |
 | Agent work folders | `~/Orlo/<task-id>` (`%USERPROFILE%\Orlo\<task-id>` on Windows), or `ORLO_WORK` if set |
+| Images and videos in notes | `attachments`, next to `orlo.db` |
 
-To back up, copy the `.db` file. To reset, delete it.
+To back up, copy the `.db` file and the `attachments` folder. To reset, delete them.
 
 ## Build from source
 

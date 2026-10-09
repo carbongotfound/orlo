@@ -190,3 +190,23 @@
 .orlo-code .cm-activeLine, .orlo-code .cm-activeLineGutter { background: color-mix(in oklch, var(--muted) 60%, transparent); }
 .orlo-code .cm-selectionBackground, .orlo-code .cm-focused .cm-selectionBackground { background: color-mix(in oklch, var(--sidebar-primary) 30%, transparent) !important; }
 .orlo-code .cm-matchingBracket { background: color-mix(in oklch, var(--sidebar-primary) 25%, transparent); outline: none; }
+.orlo-code .cm-foldGutter .cm-gutterElement { padding: 0 4px; cursor: pointer; }
+.orlo-code .cm-foldPlaceholder { background: var(--muted); border: none; color: var(--muted-foreground); padding: 0 4px; }
+.orlo-code .cm-selectionMatch { background: color-mix(in oklch, var(--sidebar-primary) 15%, transparent); }
+.orlo-code .cm-searchMatch { background: color-mix(in oklch, oklch(0.8 0.15 85) 35%, transparent); outline: 1px solid color-mix(in oklch, oklch(0.8 0.15 85) 60%, transparent); }
+.orlo-code .cm-searchMatch-selected { background: color-mix(in oklch, oklch(0.8 0.15 85) 60%, transparent); }
+.orlo-code .cm-panels { background: var(--background); color: var(--foreground); border-color: var(--border); }
+.orlo-code .cm-panels-bottom { border-top: 1px solid var(--border); }
+.orlo-code .cm-panel.cm-search { padding: 6px 8px; font-family: inherit; font-size: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.orlo-code .cm-panel.cm-search br { flex-basis: 100%; content: ""; }
+.orlo-code .cm-panel.cm-search input.cm-textfield { background: var(--background); color: var(--foreground); border: 1px solid var(--border); border-radius: 6px; padding: 2px 6px; font-size: 12px; outline: none; }
+.orlo-code .cm-panel.cm-search input.cm-textfield:focus { box-shadow: 0 0 0 1px var(--ring); }
+.orlo-code .cm-panel.cm-search .cm-button { background: var(--muted); background-image: none; color: var(--foreground); border: none; border-radius: 6px; padding: 2px 8px; font-size: 12px; cursor: pointer; }
+.orlo-code .cm-panel.cm-search label { color: var(--muted-foreground); font-size: 12px; display: inline-flex; align-items: center; gap: 3px; }
+.orlo-code .cm-panel.cm-search button[name="close"] { color: var(--muted-foreground); font-size: 16px; }
+.orlo-code .cm-tooltip { background: var(--popover); color: var(--popover-foreground); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.orlo-code .cm-tooltip-autocomplete > ul { font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace; font-size: 12px; max-height: 14em; }
+.orlo-code .cm-tooltip-autocomplete > ul > li { padding: 2px 8px !important; }
+.orlo-code .cm-tooltip-autocomplete > ul > li[aria-selected] { background: var(--muted); color: var(--foreground); }
+.orlo-code .cm-completionDetail { color: var(--muted-foreground); font-style: normal; margin-left: 8px; }
+.orlo-md .md-media { display: block; max-width: 100%; max-height: 22rem; margin: 6px 0; border-radius: 10px; border: 1px solid var(--border); }
